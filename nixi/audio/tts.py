@@ -155,7 +155,7 @@ class NixiTTS:
                             chunks.append(chunk["data"])
                     return b"".join(chunks)
 
-                audio_bytes = loop.run_until_complete(_fetch())
+                audio_bytes = loop.run_until_complete(asyncio.wait_for(_fetch(), timeout=8.0))
                 if not audio_bytes or self.interrupted.is_set():
                     return None
 
@@ -203,13 +203,11 @@ class NixiTTS:
                 # Play through sounddevice
                 sd.play(audio_data, samplerate=sample_rate)
 
-                # Wait for this chunk's playback duration while monitoring interruption
+                # Wait for this chunk's playback duration using wall-clock time
                 duration = len(audio_data) / float(sample_rate)
-                step = 0.02
-                elapsed = 0.0
-                while elapsed < duration and not self.interrupted.is_set():
-                    time.sleep(step)
-                    elapsed += step
+                start_t = time.time()
+                while (time.time() - start_t) < duration and not self.interrupted.is_set():
+                    time.sleep(0.02)
 
                 if self.interrupted.is_set():
                     sd.stop()
@@ -254,7 +252,6 @@ class SentenceStreamer:
                     self.sentence_count += 1
                     self.is_first_chunk = False
                     self.tts.enqueue_sentence(first_words)
-                    return
 
         # ── Standard Clause/Sentence Chunking for subsequent speech ──
         while True:
@@ -285,9 +282,22 @@ class SentenceStreamer:
 
     def finish(self):
         """Flush any remaining buffered text when stream ends."""
+        while True:
+            match = re.search(r"^(.*?)([.!?]+(?:\s+|\Z)|\n+)(.*)$", self.buffer, re.DOTALL)
+            if match:
+                sentence = (match.group(1) + match.group(2)).strip()
+                self.buffer = match.group(3)
+                if sentence and len(sentence) > 2:
+                    self.sentence_count += 1
+                    self.tts.enqueue_sentence(sentence)
+                    if self.sentence_count >= self.max_sentences:
+                        break
+            else:
+                break
+
         if self.sentence_count < self.max_sentences:
             remaining = self.buffer.strip()
-            if remaining and len(remaining) > 2:
+            if remaining and len(remaining) > 1:
                 self.sentence_count += 1
                 self.tts.enqueue_sentence(remaining)
         self.buffer = ""

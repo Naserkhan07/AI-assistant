@@ -74,11 +74,12 @@ class NixiApp:
         self.island = NixiDynamicIsland()
         self._wire_signals()
 
-        # Audio capture
+        # Audio capture with speaker echo suppression
         self.audio = AudioCapture(
             on_speech_detected=self._on_speech_start,
             on_speech_finished=self._on_speech_done,
-            on_audio_level=lambda lvl: self.bridge.audio_level_changed.emit(lvl)
+            on_audio_level=lambda lvl: self.bridge.audio_level_changed.emit(lvl),
+            is_tts_speaking=lambda: self.tts.is_speaking
         )
 
         # Chat history memory for LLM
@@ -121,10 +122,6 @@ class NixiApp:
             self.island.set_status("Idle", "happy")
 
     def _on_speech_start(self):
-        # Instant Barge-In: Halt Nixi voice immediately when user starts speaking!
-        if self.tts.is_speaking:
-            self.tts.stop()
-
         if self.dictation.is_active:
             self.bridge.status_changed.emit("Dictating...", "listening")
         else:
@@ -292,7 +289,7 @@ class NixiApp:
             collected = []
             first_chunk = True
             # Concurrent sentence streamer feeds voice *then and there* while text streams!
-            streamer = SentenceStreamer(self.tts, max_speech_sentences=3)
+            streamer = SentenceStreamer(self.tts, max_speech_sentences=50)
             try:
                 for chunk in self.llm.chat_stream(self.conversation_history):
                     collected.append(chunk)

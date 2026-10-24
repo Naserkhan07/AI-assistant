@@ -25,6 +25,7 @@ class AudioCapture:
         on_speech_detected: Optional[Callable[[], None]] = None,
         on_speech_finished: Optional[Callable[[np.ndarray], None]] = None,
         on_audio_level: Optional[Callable[[float], None]] = None,
+        is_tts_speaking: Optional[Callable[[], bool]] = None,
     ):
         self.sample_rate = sample_rate
         self.chunk_size = int(sample_rate * (chunk_duration_ms / 1000.0))
@@ -33,6 +34,7 @@ class AudioCapture:
         self.on_speech_detected = on_speech_detected
         self.on_speech_finished = on_speech_finished
         self.on_audio_level = on_audio_level
+        self.is_tts_speaking = is_tts_speaking
 
         self.is_running = False
         self.stream = None
@@ -40,6 +42,7 @@ class AudioCapture:
         self.is_speaking = False
         self.silence_chunks = 0
         self.max_silence_chunks = int(silence_duration_sec / (chunk_duration_ms / 1000.0))
+        self.echo_cooldown_until = 0.0
 
     def start(self):
         if not HAS_SD:
@@ -69,6 +72,21 @@ class AudioCapture:
 
     def _audio_callback(self, indata, frames, time_info, status):
         if not self.is_running:
+            return
+
+        # Acoustic Echo Prevention: Ignore mic feedback when Nixi is speaking
+        tts_active = self.is_tts_speaking() if self.is_tts_speaking else False
+        if tts_active:
+            self.echo_cooldown_until = time.time() + 0.40
+            self.is_speaking = False
+            self.speech_buffer = []
+            self.silence_chunks = 0
+            return
+
+        if time.time() < self.echo_cooldown_until:
+            self.is_speaking = False
+            self.speech_buffer = []
+            self.silence_chunks = 0
             return
 
         chunk = indata[:, 0]
