@@ -13,7 +13,8 @@ An ultra-fast, minimal desktop AI assistant for Windows inspired by **HeyNixi** 
   - **Volume & Media**: Control master volume (`volume 70`, `mute`, `unmute`), media playback (`play`, `pause`, `next track`, `skip`).
   - **Window Management**: `tile left`, `tile right`, `maximize`, `minimize all`, `show desktop`, `lock computer`.
   - **Hardware Diagnostics**: Instant CPU, RAM, Disk, and Battery diagnostics (`system status`).
-  - **Live Web Search**: Search DuckDuckGo directly (`search web for...`, `who is...`) with instant real-time summaries.
+  - **🔍 Exa Neural Search**: Semantic web search powered by Exa AI (`search web for...`, `exa search...`) with live highlights and content extraction.
+  - **👁️ Agent Reach Internet Access**: Read clean markdown from any URL via Jina Reader (`read page <url>`), extract YouTube video info and subtitles (`summarize video <url>`), and check reachability (`agent reach doctor`).
   - **PowerShell & Shell**: Execute arbitrary terminal commands silently (`run powershell ...`).
   - **File Search**: Locate files across Desktop, Documents, and Downloads in milliseconds.
 - **🎯 Autonomous Browser & Screen Automation**: Observes form fields, tables (e.g. Siemens Polarion, Jira, Google Forms), buttons, and inputs, and populates or executes actions in under 0.15s.

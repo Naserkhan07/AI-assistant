@@ -112,9 +112,35 @@ class GodModeAgent:
             return True, self.system.open_url("google.com")
 
         # -------------------------------------------------------------
-        # 6. WEB SEARCH (DuckDuckGo Live Search)
+        # 6. AGENT REACH WEB PAGE READER & YOUTUBE TRANSCRIPT
         # -------------------------------------------------------------
-        search_match = re.search(r"^(?:search(?:\s+the\s+web)?(?:\s+for)?|google|look\s+up)\s+(.+)$", lower)
+        read_match = re.search(r"^(?:read(?:\s+the)?\s+(?:webpage|page|link|article|url)?|fetch(?:\s+page)?)\s+(https?://[^\s]+)$", lower)
+        if read_match:
+            target_url = read_match.group(1).strip()
+            if on_voice_feedback:
+                on_voice_feedback("Reading web page.")
+            content = self.system.read_webpage(target_url, max_chars=1200)
+            if content:
+                summary = f"Summary from {target_url}:\n{content[:350]}..."
+                return True, summary
+            return True, f"Could not extract clean text from {target_url}."
+
+        yt_match = re.search(r"^(?:summarize\s+video|video\s+details|youtube\s+summary)\s+(https?://[^\s]+)$", lower)
+        if yt_match:
+            target_url = yt_match.group(1).strip()
+            if on_voice_feedback:
+                on_voice_feedback("Extracting video information.")
+            yt_info = self.system.get_youtube_transcript(target_url)
+            return True, yt_info
+
+        if lower in ("agent reach doctor", "reach doctor", "check internet reach", "agent reach status"):
+            out = self.system.run_powershell("app\\.venv\\Scripts\\agent-reach.exe doctor")
+            return True, f"Agent Reach Status:\n{out[:400]}"
+
+        # -------------------------------------------------------------
+        # 7. EXA NEURAL & LIVE WEB SEARCH
+        # -------------------------------------------------------------
+        search_match = re.search(r"^(?:search(?:\s+the\s+web)?(?:\s+for)?|google|look\s+up|exa(?:\s+search)?)\s+(.+)$", lower)
         if search_match:
             query = search_match.group(1).strip()
             if on_voice_feedback:
@@ -122,7 +148,7 @@ class GodModeAgent:
             results = self.system.web_search(query, max_results=3)
             if results and results[0].get("snippet"):
                 top = results[0]
-                summary = f"According to web search for '{query}': {top['snippet'][:250]}"
+                summary = f"According to Exa search for '{query}': {top['snippet'][:250]}"
                 return True, summary
             else:
                 self.system.open_url(f"https://www.google.com/search?q={query}")

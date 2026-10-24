@@ -218,23 +218,90 @@ class SystemOps:
         return results
 
     @staticmethod
-    def web_search(query: str, max_results: int = 4) -> List[Dict[str, str]]:
-        """Search the live web using DuckDuckGo."""
-        if not HAS_DDGS:
-            return [{"title": "Web search unavailable", "snippet": "DuckDuckGo module not found."}]
+    def exa_search(query: str, num_results: int = 3) -> List[Dict[str, str]]:
+        """Search the web using Exa Neural Search API with highlights and live content."""
+        api_key = os.getenv("EXA_API_KEY", "16eb355e-7c10-4429-be29-2653a896a43f")
+        if not api_key:
+            return []
         try:
-            with DDGS() as ddgs:
-                raw_results = list(ddgs.text(query, max_results=max_results))
-                formatted = []
-                for r in raw_results:
-                    formatted.append({
-                        "title": r.get("title", ""),
-                        "url": r.get("href", ""),
-                        "snippet": r.get("body", "")
-                    })
-                return formatted
+            from exa_py import Exa
+            exa = Exa(api_key=api_key)
+            res = exa.search(query, type="auto", num_results=num_results, contents={"highlights": True})
+            results = []
+            for r in res.results:
+                highlight_text = " ".join(r.highlights) if r.highlights else ""
+                results.append({
+                    "title": r.title or "",
+                    "url": r.url or "",
+                    "snippet": highlight_text or (r.text[:300] if hasattr(r, 'text') and r.text else "")
+                })
+            return results
         except Exception as e:
-            return [{"title": "Search error", "snippet": str(e)}]
+            print(f"[Exa Search Error] {e}")
+            return []
+
+    @staticmethod
+    def read_webpage(url: str, max_chars: int = 1500) -> str:
+        """Fetch and extract clean markdown from any URL via Jina Reader (Agent Reach zero-config reader)."""
+        if not url.startswith("http://") and not url.startswith("https://"):
+            url = f"https://{url}"
+        try:
+            import httpx
+            jina_url = f"https://r.jina.ai/{url}"
+            resp = httpx.get(jina_url, timeout=10.0, headers={"User-Agent": "Nixi-Assistant/1.0"})
+            if resp.status_code == 200:
+                return resp.text.strip()[:max_chars]
+        except Exception as e:
+            print(f"[Jina Reader Error] {e}")
+        return ""
+
+    @staticmethod
+    def get_youtube_transcript(url: str) -> str:
+        """Extract title and video details from YouTube using yt-dlp."""
+        try:
+            import yt_dlp
+            ydl_opts = {
+                'skip_download': True,
+                'writesubtitles': True,
+                'writeautomaticsub': True,
+                'subtitleslangs': ['en'],
+                'quiet': True,
+                'no_warnings': True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                title = info.get('title', 'Video')
+                description = info.get('description', '')
+                return f"Title: {title}\nDescription: {description[:400]}"
+        except Exception as e:
+            return f"Video details unavailable: {e}"
+
+    @staticmethod
+    def web_search(query: str, max_results: int = 3) -> List[Dict[str, str]]:
+        """Search the live web using Exa Neural Search, falling back to DuckDuckGo."""
+        # 1. Try Exa Neural Search first (state-of-the-art semantic retrieval)
+        exa_res = SystemOps.exa_search(query, num_results=max_results)
+        if exa_res:
+            return exa_res
+
+        # 2. Fallback to DuckDuckGo
+        if HAS_DDGS:
+            try:
+                with DDGS() as ddgs:
+                    raw_results = list(ddgs.text(query, max_results=max_results))
+                    formatted = []
+                    for r in raw_results:
+                        formatted.append({
+                            "title": r.get("title", ""),
+                            "url": r.get("href", ""),
+                            "snippet": r.get("body", "")
+                        })
+                    if formatted:
+                        return formatted
+            except Exception:
+                pass
+
+        return [{"title": "Web search unavailable", "url": "", "snippet": "No search results found."}]
 
     @staticmethod
     def open_url(url: str) -> str:
