@@ -199,6 +199,8 @@ class NixiApp:
                 self.bridge.status_changed.emit("Idle", "happy")
             return
 
+        print(f"[Nixi Voice] Heard: '{text}'")
+
         # Acoustic Echo & Self-Interruption Guard:
         # If assistant is currently speaking or synthesizing, only allow explicit stop commands
         if self.tts.is_speaking:
@@ -228,10 +230,14 @@ class NixiApp:
         should_process = (not wake_enabled) or is_wake or self.island.is_expanded
 
         if should_process:
+            actual_cmd = (command if is_wake and command else text).strip()
+            print(f"[Nixi Voice] Executing command: '{actual_cmd}'")
             self.bridge.status_changed.emit("Thinking...", "thinking")
-            actual_cmd = command if is_wake else text
+            # Show the user's voice message in the chat display so they see it was heard
+            self.bridge.chat_message_received.emit(f"🗣️ {actual_cmd}", True)
             self.bridge.command_signal.emit(actual_cmd)
         else:
+            print(f"[Nixi Voice] Ignored (wake word required): '{text}'")
             self.bridge.status_changed.emit("Idle", "happy")
 
     def _execute_command_text(self, cmd: str):
