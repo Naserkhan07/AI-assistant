@@ -22,7 +22,7 @@ else:
 
 DEFAULT_BASE_URL = os.getenv("FREELLMAPI_URL", "http://127.0.0.1:3001/v1")
 DEFAULT_API_KEY = os.getenv("FREELLMAPI_KEY", "")
-DEFAULT_MODEL = os.getenv("FREELLMAPI_MODEL", "auto")
+DEFAULT_MODEL = os.getenv("FREELLMAPI_MODEL", "mistral-nemo")
 
 SYSTEM_PROMPT = """You are Nixi, an ultra-fast Windows AI desktop assistant.
 Respond immediately in 1-2 punchy, direct sentences.
@@ -32,8 +32,9 @@ class NixiLLMClient:
     def __init__(self, base_url: str = DEFAULT_BASE_URL, api_key: str = DEFAULT_API_KEY, model: str = DEFAULT_MODEL):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key or os.getenv("FREELLMAPI_KEY", "")
-        self.model = model or "auto"
-        self.client = httpx.Client(timeout=12.0)
+        self.model = model or "mistral-nemo"
+        # Fast connect and responsive read timeout
+        self.client = httpx.Client(timeout=httpx.Timeout(connect=3.5, read=6.0, write=5.0, pool=5.0))
 
     def is_online(self) -> bool:
         """Check if FreeLLMAPI or endpoint is reachable."""
@@ -47,21 +48,21 @@ class NixiLLMClient:
             return False
 
     def _get_candidate_models(self) -> List[str]:
-        """Returns ordered list of free models to try in case of 502/429 upstream provider errors."""
+        """Returns ordered list of verified free models to try in case of 502/429 upstream errors."""
+        unusable = {"gemini-flash", "llama-instant", "groq-compound-mini", "auto:fast"}
+        preferred = self.model if self.model not in unusable else "mistral-nemo"
         order = [
-            self.model,
-            "auto",
-            "kilo-auto",
-            "gemini-flash",
+            preferred,
+            "mistral-nemo",
             "free-router",
+            "kilo-auto",
             "dots3-note-preview",
-            "llama-instant",
-            "groq-compound-mini"
+            "auto",
         ]
         seen = set()
         candidates = []
         for m in order:
-            if m and m not in seen:
+            if m and m not in seen and m not in unusable:
                 seen.add(m)
                 candidates.append(m)
         return candidates
@@ -91,9 +92,10 @@ class NixiLLMClient:
             }
 
             try:
-                with self.client.stream("POST", url, headers=headers, json=payload, timeout=8.0) as response:
+                with self.client.stream("POST", url, headers=headers, json=payload, timeout=httpx.Timeout(connect=3.5, read=6.0, write=5.0, pool=5.0)) as response:
                     if response.status_code == 200:
                         stream_failed = False
+                        in_think = False
                         for line in response.iter_lines():
                             line = line.strip()
                             if not line or not line.startswith("data: "):
@@ -108,6 +110,19 @@ class NixiLLMClient:
                                     break
                                 delta = chunk.get("choices", [{}])[0].get("delta", {})
                                 content = delta.get("content", "")
+                                if not content:
+                                    continue
+
+                                # Suppress internal reasoning or thinking tags if present
+                                if "<think>" in content:
+                                    in_think = True
+                                if in_think:
+                                    if "</think>" in content:
+                                        in_think = False
+                                        content = content.split("</think>")[-1]
+                                    else:
+                                        continue
+
                                 if content:
                                     has_streamed = True
                                     yield content
@@ -130,7 +145,26 @@ class NixiLLMClient:
                 print(f"[Nixi LLM] Model '{model_name}' stream error: {e}. Trying fallback...")
                 continue
 
+        # Fast non-streaming rescue attempt if streaming tokens stalled
         if not has_streamed:
+            for rescue_model in ["mistral-nemo", "free-router", "kilo-auto"]:
+                try:
+                    rescue_payload = {
+                        "model": rescue_model,
+                        "messages": full_messages,
+                        "temperature": temperature,
+                        "max_tokens": 120,
+                        "stream": False,
+                    }
+                    r = self.client.post(url, headers=headers, json=rescue_payload, timeout=5.0)
+                    if r.status_code == 200:
+                        content = r.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+                        if content:
+                            yield content
+                            return
+                except Exception:
+                    pass
+
             yield "All cloud model endpoints are temporarily busy. I am ready to help with local tasks, system controls, and web search."
 
     def analyze_screen(self, image_bytes: bytes, prompt: str = "Describe what is on my screen in 1-2 concise sentences.") -> str:
@@ -166,7 +200,7 @@ class NixiLLMClient:
             }
 
             try:
-                resp = self.client.post(url, headers=headers, json=payload, timeout=10.0)
+                resp = self.client.post(url, headers=headers, json=payload, timeout=12.0)
                 if resp.status_code == 200:
                     data = resp.json()
                     content = data.get("choices", [{}])[0].get("message", {}).get("content", "")

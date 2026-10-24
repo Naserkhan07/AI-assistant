@@ -49,6 +49,9 @@ class Bridge(QObject):
     audio_level_changed = pyqtSignal(float)
     chat_message_received = pyqtSignal(str, bool)
     dictate_state_changed = pyqtSignal(bool)
+    expand_island_signal = pyqtSignal()
+    collapse_island_signal = pyqtSignal()
+    command_signal = pyqtSignal(str)
 
 
 class NixiApp:
@@ -88,16 +91,26 @@ class NixiApp:
         # Windows Global Hotkey Listener (optional background thread)
         self._start_hotkey_listener()
 
+    def _delayed_status(self, text: str = "Idle", mood: str = "happy", delay: float = 2.5):
+        """Thread-safe delayed status reset without QTimer cross-thread warnings."""
+        def run():
+            time.sleep(delay)
+            self.bridge.status_changed.emit(text, mood)
+        threading.Thread(target=run, daemon=True).start()
+
     def _wire_signals(self):
         # Bridge to UI
         self.bridge.status_changed.connect(self.island.set_status)
         self.bridge.audio_level_changed.connect(self.island.set_audio_level)
         self.bridge.chat_message_received.connect(lambda msg, is_user: self.island.set_response(msg))
+        self.bridge.expand_island_signal.connect(self.island.expand)
+        self.bridge.collapse_island_signal.connect(self.island.collapse)
 
         # Dynamic Island UI signals to actions
         self.island.send_query_signal.connect(self._execute_command_text)
         self.island.dictate_toggled_signal.connect(self._toggle_dictation)
         self.island.screen_vision_signal.connect(self._handle_screen_vision)
+        self.bridge.command_signal.connect(self._execute_command_text)
 
     def _start_hotkey_listener(self):
         """Register keyboard shortcuts using keyboard if available."""
@@ -131,8 +144,20 @@ class NixiApp:
         """Transcribe and route audio speech."""
         text = self.stt.transcribe_audio_samples(audio_data)
         if not text:
-            if not self.dictation.is_active:
+            if not self.dictation.is_active and not self.tts.is_speaking:
                 self.bridge.status_changed.emit("Idle", "happy")
+            return
+
+        # Acoustic Echo & Self-Interruption Guard:
+        # If assistant is currently speaking or synthesizing, only allow explicit stop commands
+        if self.tts.is_speaking:
+            interrupt_words = {"stop", "quiet", "shut up", "cancel", "pause", "halt"}
+            lower_txt = text.lower().strip()
+            if any(w in lower_txt for w in interrupt_words):
+                self.tts.stop()
+                self.bridge.status_changed.emit("Stopped", "happy")
+                self._delayed_status("Idle", "happy", 1.5)
+            # Discard any noise/echo transcribed while Nixi is speaking
             return
 
         # Case 1: Dictation mode is active -> inject directly into focused app!
@@ -148,7 +173,8 @@ class NixiApp:
         is_wake, command = self.wake_detector.check(text)
         if is_wake or self.island.is_expanded:
             self.bridge.status_changed.emit("Thinking...", "thinking")
-            self._execute_command_text(command if command else text)
+            # Thread-safe cross-thread dispatch to main UI thread
+            self.bridge.command_signal.emit(command if command else text)
         else:
             self.bridge.status_changed.emit("Idle", "happy")
 
@@ -183,7 +209,7 @@ class NixiApp:
             self.bridge.status_changed.emit(ack, "happy")
             self.bridge.chat_message_received.emit(ack, False)
             self.tts.speak(ack)
-            QTimer.singleShot(2500, lambda: self.bridge.status_changed.emit("Idle", "happy"))
+            self._delayed_status("Idle", "happy", 2.5)
             return
 
         # 3. Dedicated App Launcher
@@ -195,7 +221,7 @@ class NixiApp:
                 self.bridge.status_changed.emit(msg, "happy")
                 self.bridge.chat_message_received.emit(msg, False)
                 self.tts.speak(msg)
-                QTimer.singleShot(2500, lambda: self.bridge.status_changed.emit("Idle", "happy"))
+                self._delayed_status("Idle", "happy", 2.5)
                 return
 
         # 4. God-Mode Agent (System, Media, Windows, Shell, Web Search, Screen Form Automation, Files)
@@ -204,7 +230,7 @@ class NixiApp:
             self.bridge.status_changed.emit("Done", "happy")
             self.bridge.chat_message_received.emit(result, False)
             self.tts.speak(result)
-            QTimer.singleShot(2500, lambda: self.bridge.status_changed.emit("Idle", "happy"))
+            self._delayed_status("Idle", "happy", 2.5)
             return
 
         # 5. General LLM Query with concurrent sentence-by-sentence voice streaming
@@ -215,7 +241,7 @@ class NixiApp:
         self.bridge.status_changed.emit(msg, "happy")
         self.bridge.chat_message_received.emit(msg, False)
         self.tts.speak(f"Time is up! Your {label} has finished.")
-        QTimer.singleShot(5000, lambda: self.bridge.status_changed.emit("Idle", "happy"))
+        self._delayed_status("Idle", "happy", 5.0)
 
     def _handle_screen_action(self, goal: str):
         """Execute autonomous computer & browser actions on the user's screen with high speed."""
@@ -237,16 +263,16 @@ class NixiApp:
                 summary = self.browser_agent.execute_screen_goal(goal, img_bytes)
                 
                 # Expand island and display confirmation immediately
-                QTimer.singleShot(50, self.island.expand)
+                self.bridge.expand_island_signal.emit()
                 self.bridge.chat_message_received.emit(f"✦ {summary}", False)
                 self.bridge.status_changed.emit("Complete", "happy")
                 self.tts.speak(summary)
             except Exception as e:
-                QTimer.singleShot(50, self.island.expand)
+                self.bridge.expand_island_signal.emit()
                 self.bridge.chat_message_received.emit(f"Action error: {str(e)}", False)
             finally:
                 self.island.is_executing = False
-                QTimer.singleShot(2500, lambda: self.bridge.status_changed.emit("Idle", "happy"))
+                self._delayed_status("Idle", "happy", 2.5)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -265,16 +291,16 @@ class NixiApp:
                 img_bytes = self.screen_reader.capture_screen()
                 analysis = self.llm.analyze_screen(img_bytes)
                 
-                QTimer.singleShot(50, self.island.expand)
+                self.bridge.expand_island_signal.emit()
                 self.bridge.chat_message_received.emit(analysis, False)
                 self.bridge.status_changed.emit("Done", "happy")
                 first_sentence = analysis.split(".")[0] + "." if "." in analysis else analysis
                 self.tts.speak(first_sentence)
             except Exception as e:
-                QTimer.singleShot(50, self.island.expand)
+                self.bridge.expand_island_signal.emit()
                 self.bridge.chat_message_received.emit(f"Vision error: {str(e)}", False)
             finally:
-                QTimer.singleShot(2500, lambda: self.bridge.status_changed.emit("Idle", "happy"))
+                self._delayed_status("Idle", "happy", 2.5)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -320,7 +346,7 @@ class NixiApp:
                 self.bridge.chat_message_received.emit(fallback_msg, False)
                 self.tts.speak(fallback_msg)
             finally:
-                QTimer.singleShot(2500, lambda: self.bridge.status_changed.emit("Idle", "happy"))
+                self._delayed_status("Idle", "happy", 2.5)
 
         threading.Thread(target=worker, daemon=True).start()
 

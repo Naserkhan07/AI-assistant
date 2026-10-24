@@ -38,7 +38,9 @@ class NixiTTS:
         self.text_queue: queue.Queue[Optional[str]] = queue.Queue()
         self.audio_queue: queue.Queue[Optional[Tuple[np.ndarray, int]]] = queue.Queue(maxsize=12)
         
-        self.is_speaking = False
+        self._is_speaking_flag = False
+        self._is_synthesizing = False
+        self._is_playing = False
         self.interrupted = threading.Event()
         
         # Thread 1: Synthesizer (downloads/decodes audio ahead of time)
@@ -48,6 +50,21 @@ class NixiTTS:
         # Thread 2: Player (plays decoded audio smoothly with 0ms gap)
         self.play_thread = threading.Thread(target=self._playback_loop, daemon=True)
         self.play_thread.start()
+
+    @property
+    def is_speaking(self) -> bool:
+        """Returns True if audio is playing, synthesizing, or queued."""
+        return (
+            self._is_playing
+            or self._is_synthesizing
+            or not self.text_queue.empty()
+            or not self.audio_queue.empty()
+            or self._is_speaking_flag
+        )
+
+    @is_speaking.setter
+    def is_speaking(self, val: bool):
+        self._is_speaking_flag = val
 
     def clean_text(self, text: str) -> str:
         """Strip markdown syntax, action tokens, URLs, and code blocks for clean voice output."""
@@ -67,6 +84,7 @@ class NixiTTS:
         if not clean or len(clean) < 2:
             return
         self.interrupted.clear()
+        self._is_speaking_flag = True
         self.text_queue.put(clean)
 
     def speak(self, text: str, interrupt_previous: bool = True):
@@ -85,6 +103,9 @@ class NixiTTS:
     def stop(self):
         """Instantly stop ongoing audio playback and purge all pending queues."""
         self.interrupted.set()
+        self._is_playing = False
+        self._is_synthesizing = False
+        self._is_speaking_flag = False
         try:
             sd.stop()
         except Exception:
@@ -106,8 +127,6 @@ class NixiTTS:
             except queue.Empty:
                 break
 
-        self.is_speaking = False
-
     def _synthesis_loop(self):
         """Background thread 1: Pulls text, generates audio in parallel, and pushes to audio_queue."""
         loop = asyncio.new_event_loop()
@@ -123,14 +142,19 @@ class NixiTTS:
                     self.text_queue.task_done()
                     continue
 
-                # Synthesize text into audio array
-                audio_item = self._synthesize_audio(text, loop)
-                if audio_item and not self.interrupted.is_set():
-                    self.audio_queue.put(audio_item)
+                self._is_synthesizing = True
+                try:
+                    # Synthesize text into audio array
+                    audio_item = self._synthesize_audio(text, loop)
+                    if audio_item and not self.interrupted.is_set():
+                        self.audio_queue.put(audio_item)
+                finally:
+                    self._is_synthesizing = False
 
                 self.text_queue.task_done()
 
             except Exception as e:
+                self._is_synthesizing = False
                 print(f"[Nixi TTS] Synthesis error: {e}")
 
     def _synthesize_audio(self, text: str, loop: asyncio.AbstractEventLoop) -> Optional[Tuple[np.ndarray, int]]:
@@ -198,7 +222,7 @@ class NixiTTS:
                     continue
 
                 audio_data, sample_rate = item
-                self.is_speaking = True
+                self._is_playing = True
 
                 # Play through sounddevice
                 sd.play(audio_data, samplerate=sample_rate)
@@ -212,14 +236,16 @@ class NixiTTS:
                 if self.interrupted.is_set():
                     sd.stop()
 
+                self._is_playing = False
                 self.audio_queue.task_done()
 
-                if self.audio_queue.empty() and self.text_queue.empty():
-                    self.is_speaking = False
+                if self.audio_queue.empty() and self.text_queue.empty() and not self._is_synthesizing:
+                    self._is_speaking_flag = False
 
             except Exception as e:
                 print(f"[Nixi TTS] Playback loop error: {e}")
-                self.is_speaking = False
+                self._is_playing = False
+                self._is_speaking_flag = False
 
 
 class SentenceStreamer:
@@ -227,12 +253,14 @@ class SentenceStreamer:
     Buffers streaming token chunks from the LLM and feeds initial words
     and sentences to NixiTTS *concurrently*, so speech begins within 200ms of text!
     """
-    def __init__(self, tts: NixiTTS, max_speech_sentences: int = 4):
+    def __init__(self, tts: NixiTTS, max_speech_sentences: int = 50):
         self.tts = tts
         self.buffer = ""
         self.sentence_count = 0
         self.max_sentences = max_speech_sentences
         self.is_first_chunk = True
+        # Immediately guard against microphone self-capture while stream begins
+        self.tts.is_speaking = True
 
     def feed(self, chunk: str):
         """Feed a new streaming token chunk from the LLM."""

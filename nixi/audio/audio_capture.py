@@ -77,7 +77,7 @@ class AudioCapture:
         # Acoustic Echo Prevention: Ignore mic feedback when Nixi is speaking
         tts_active = self.is_tts_speaking() if self.is_tts_speaking else False
         if tts_active:
-            self.echo_cooldown_until = time.time() + 0.40
+            self.echo_cooldown_until = time.time() + 0.55
             self.is_speaking = False
             self.speech_buffer = []
             self.silence_chunks = 0
