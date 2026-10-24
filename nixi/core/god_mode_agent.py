@@ -14,6 +14,8 @@ import json
 import time
 import os
 import pyautogui
+pyautogui.FAILSAFE = False
+pyautogui.PAUSE = 0.02
 import pyperclip
 from typing import Dict, Any, List, Optional, Tuple, Callable
 
@@ -96,23 +98,63 @@ class GodModeAgent:
             msg = f"CPU: {stats['cpu_percent']}%, RAM: {stats['ram_used_gb']}GB / {stats['ram_total_gb']}GB ({stats['ram_percent']}%), Disk Free: {stats['disk_free_gb']}GB{bat_str}."
             return True, msg
 
+        # Instant Time and Date
+        if lower in ("what time is it", "what is the time", "current time", "tell me the time", "time"):
+            import datetime
+            now_str = datetime.datetime.now().strftime("%I:%M %p")
+            return True, f"The current time is {now_str}."
+        elif "date" in lower or lower in ("what day is it", "today's day"):
+            import datetime
+            date_str = datetime.datetime.now().strftime("%A, %B %d, %Y")
+            return True, f"Today is {date_str}."
+
         # -------------------------------------------------------------
-        # 5. OPEN WEBSITES / URLS DIRECTLY
+        # 5. OPEN WEBSITES / POPULAR HUBS DIRECTLY
         # -------------------------------------------------------------
+        POPULAR_SITES = {
+            "youtube": "https://www.youtube.com",
+            "google": "https://www.google.com",
+            "github": "https://www.github.com",
+            "reddit": "https://www.reddit.com",
+            "twitter": "https://www.x.com",
+            "x": "https://www.x.com",
+            "netflix": "https://www.netflix.com",
+            "amazon": "https://www.amazon.com",
+            "chatgpt": "https://chatgpt.com",
+            "instagram": "https://www.instagram.com",
+            "facebook": "https://www.facebook.com",
+            "linkedin": "https://www.linkedin.com",
+            "wikipedia": "https://www.wikipedia.org",
+            "twitch": "https://www.twitch.tv",
+            "gmail": "https://mail.google.com",
+            "whatsapp": "https://web.whatsapp.com",
+        }
+
+        site_open_match = re.search(r"^(?:open|go\s+to|launch|visit)\s+(?:the\s+)?([a-zA-Z0-9]+)$", lower)
+        if site_open_match:
+            site_key = site_open_match.group(1).strip()
+            if site_key in POPULAR_SITES:
+                return True, self.system.open_url(POPULAR_SITES[site_key])
+
         web_match = re.search(r"^(?:open|go\s+to|visit)\s+(?:https?://)?([a-zA-Z0-9-]+\.(?:com|org|net|io|dev|edu|ai|gov)[^\s]*)$", lower)
         if web_match:
             target_url = web_match.group(1)
             return True, self.system.open_url(target_url)
 
-        if lower in ("open youtube", "launch youtube"):
-            return True, self.system.open_url("youtube.com")
-        elif lower in ("open github", "launch github"):
-            return True, self.system.open_url("github.com")
-        elif lower in ("open google", "launch google"):
-            return True, self.system.open_url("google.com")
+        # -------------------------------------------------------------
+        # 6. YOUTUBE MUSIC & VIDEO SEARCH & PLAY
+        # -------------------------------------------------------------
+        if "youtube" in lower and ("play" in lower or "search" in lower or "find" in lower):
+            yt_query = re.sub(r"^(?:play|search(?:\s+for)?|find)\s+", "", lower)
+            yt_query = re.sub(r"\s+(?:on|in)\s+youtube$", "", yt_query).replace("youtube", "").strip()
+            if yt_query:
+                import urllib.parse
+                yt_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(yt_query)}"
+                self.system.open_url(yt_url)
+                return True, f"Searching and playing '{yt_query}' on YouTube."
 
         # -------------------------------------------------------------
-        # 6. AGENT REACH WEB PAGE READER & YOUTUBE TRANSCRIPT
+        # 7. AGENT REACH WEB PAGE READER & YOUTUBE TRANSCRIPT
         # -------------------------------------------------------------
         read_match = re.search(r"^(?:read(?:\s+the)?\s+(?:webpage|page|link|article|url)?|fetch(?:\s+page)?)\s+(https?://[^\s]+)$", lower)
         if read_match:
@@ -138,7 +180,7 @@ class GodModeAgent:
             return True, f"Agent Reach Status:\n{out[:400]}"
 
         # -------------------------------------------------------------
-        # 7. EXA NEURAL & LIVE WEB SEARCH
+        # 8. EXA NEURAL & LIVE WEB SEARCH
         # -------------------------------------------------------------
         search_match = re.search(r"^(?:search(?:\s+the\s+web)?(?:\s+for)?|google|look\s+up|exa(?:\s+search)?)\s+(.+)$", lower)
         if search_match:
@@ -146,7 +188,7 @@ class GodModeAgent:
             if on_voice_feedback:
                 on_voice_feedback("Searching the web.")
             results = self.system.web_search(query, max_results=3)
-            if results and results[0].get("snippet"):
+            if results and results[0].get("snippet") and not results[0].get("snippet").startswith("No search"):
                 top = results[0]
                 summary = f"According to Exa search for '{query}': {top['snippet'][:250]}"
                 return True, summary
@@ -155,7 +197,7 @@ class GodModeAgent:
                 return True, f"Searching Google for: {query}"
 
         # -------------------------------------------------------------
-        # 7. POWERSHELL / COMMAND EXECUTION
+        # 9. POWERSHELL / COMMAND EXECUTION
         # -------------------------------------------------------------
         sh_match = re.search(r"^(?:run\s+powershell|powershell|cmd|terminal|exec|execute\s+command)\s+(.+)$", raw, re.IGNORECASE)
         if sh_match:
@@ -166,7 +208,7 @@ class GodModeAgent:
             return True, f"Output:\n{out[:400]}"
 
         # -------------------------------------------------------------
-        # 8. FILE SEARCH (Desktop, Documents, Downloads)
+        # 10. FILE SEARCH (Desktop, Documents, Downloads)
         # -------------------------------------------------------------
         find_match = re.search(r"^(?:find\s+file|search\s+file|where\s+is\s+file|locate)\s+(.+)$", lower)
         if find_match:
@@ -174,14 +216,18 @@ class GodModeAgent:
             found = self.system.search_files(query_file)
             if found:
                 first = found[0]
-                # Open containing folder if requested or return paths
                 return True, f"Found {len(found)} file(s). Top match: {first}"
             return True, f"No files matching '{query_file}' found in Desktop, Documents, or Downloads."
 
         # -------------------------------------------------------------
-        # 9. DESKTOP & BROWSER FORM/TABLE AUTOMATION
+        # 11. DESKTOP & BROWSER FORM/TABLE AUTOMATION (Specific action intent)
         # -------------------------------------------------------------
-        if re.search(r"\b(fill|click|type|box|boxes|boxex|form|browser|button|enter|populate|submit|select|press)\b", lower):
+        gui_intent = (
+            re.search(r"^(?:please\s+)?(?:click(?:\s+on)?|press(?:\s+the)?\s+(?:button|key|enter|tab|esc|escape|space)|fill(?:\s+out|\s+in)?(?:\s+the)?\s+(?:form|box|boxes|field)|type\s+['\"].+['\"]\s+in|submit(?:\s+the)?\s+form)\b", lower)
+            or (("click" in lower or "double click" in lower) and ("button" in lower or "link" in lower or "icon" in lower or "on " in lower))
+            or ("fill" in lower and ("form" in lower or "field" in lower or "boxes" in lower or "input" in lower))
+        )
+        if gui_intent:
             if on_voice_feedback:
                 on_voice_feedback("Executing on screen.")
             time.sleep(0.06)
@@ -190,7 +236,7 @@ class GodModeAgent:
             return True, summary
 
         # -------------------------------------------------------------
-        # 10. SCREEN VISION (Explain/Inspect active view)
+        # 12. SCREEN VISION (Explain/Inspect active view)
         # -------------------------------------------------------------
         if lower in ("read screen", "what is on my screen", "look at this", "inspect screen", "explain this"):
             if on_voice_feedback:

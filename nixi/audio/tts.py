@@ -38,7 +38,6 @@ class NixiTTS:
         self.text_queue: queue.Queue[Optional[str]] = queue.Queue()
         self.audio_queue: queue.Queue[Optional[Tuple[np.ndarray, int]]] = queue.Queue(maxsize=12)
         
-        self._is_speaking_flag = False
         self._is_synthesizing = False
         self._is_playing = False
         self.interrupted = threading.Event()
@@ -53,18 +52,17 @@ class NixiTTS:
 
     @property
     def is_speaking(self) -> bool:
-        """Returns True if audio is playing, synthesizing, or queued."""
+        """Returns True if audio is actively playing, synthesizing, or queued."""
         return (
             self._is_playing
             or self._is_synthesizing
             or not self.text_queue.empty()
             or not self.audio_queue.empty()
-            or self._is_speaking_flag
         )
 
     @is_speaking.setter
     def is_speaking(self, val: bool):
-        self._is_speaking_flag = val
+        pass
 
     def clean_text(self, text: str) -> str:
         """Strip markdown syntax, action tokens, URLs, and code blocks for clean voice output."""
@@ -84,7 +82,6 @@ class NixiTTS:
         if not clean or len(clean) < 2:
             return
         self.interrupted.clear()
-        self._is_speaking_flag = True
         self.text_queue.put(clean)
 
     def speak(self, text: str, interrupt_previous: bool = True):
@@ -105,7 +102,6 @@ class NixiTTS:
         self.interrupted.set()
         self._is_playing = False
         self._is_synthesizing = False
-        self._is_speaking_flag = False
         try:
             sd.stop()
         except Exception:
@@ -245,7 +241,6 @@ class NixiTTS:
             except Exception as e:
                 print(f"[Nixi TTS] Playback loop error: {e}")
                 self._is_playing = False
-                self._is_speaking_flag = False
 
 
 class SentenceStreamer:
@@ -259,8 +254,6 @@ class SentenceStreamer:
         self.sentence_count = 0
         self.max_sentences = max_speech_sentences
         self.is_first_chunk = True
-        # Immediately guard against microphone self-capture while stream begins
-        self.tts.is_speaking = True
 
     def feed(self, chunk: str):
         """Feed a new streaming token chunk from the LLM."""

@@ -16,8 +16,8 @@ from typing import List, Dict, Any, Optional, Tuple
 class BrowserExecutionAgent:
     def __init__(self, llm_client):
         self.llm = llm_client
-        pyautogui.FAILSAFE = True
-        pyautogui.PAUSE = 0.005
+        pyautogui.FAILSAFE = False
+        pyautogui.PAUSE = 0.01
 
     def execute_screen_goal(self, goal: str, screenshot_bytes: bytes) -> str:
         """

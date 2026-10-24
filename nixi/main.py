@@ -169,72 +169,93 @@ class NixiApp:
             self.bridge.status_changed.emit(f"Typed: {text[:14]}", "listening")
             return
 
-        # Case 2: Standard assistant wake word check
+        # Case 2: Standard assistant speech routing
+        wake_enabled = os.getenv("WAKE_WORD_ENABLED", "false").lower() == "true"
         is_wake, command = self.wake_detector.check(text)
-        if is_wake or self.island.is_expanded:
+
+        # Allow command if: wake word is disabled, or wake word was spoken, or island is expanded
+        should_process = (not wake_enabled) or is_wake or self.island.is_expanded
+
+        if should_process:
             self.bridge.status_changed.emit("Thinking...", "thinking")
-            # Thread-safe cross-thread dispatch to main UI thread
-            self.bridge.command_signal.emit(command if command else text)
+            actual_cmd = command if is_wake else text
+            self.bridge.command_signal.emit(actual_cmd)
         else:
             self.bridge.status_changed.emit("Idle", "happy")
 
     def _execute_command_text(self, cmd: str):
-        """Analyze user command: match built-in local actions, god-mode operations, or LLM."""
-        if not cmd:
+        """Analyze user command asynchronously without freezing the UI thread."""
+        if not cmd or not cmd.strip():
             self.bridge.status_changed.emit("Idle", "happy")
             return
 
-        # Stop any ongoing speech immediately when a new command arrives
-        self.tts.stop()
+        cmd = cmd.strip()
 
-        lower = cmd.lower().strip()
+        def runner():
+            try:
+                self.tts.stop()
+                lower = cmd.lower().strip()
 
-        # 1. Dictation toggle
-        if "start dictation" in lower or "dictate" == lower:
-            self.island.mic_btn.setChecked(True)
-            return
-        elif "stop dictation" in lower:
-            self.island.mic_btn.setChecked(False)
-            return
+                # Clean conversational politeness prefixes
+                clean = re.sub(r"^(?:please\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+|hey\s+nixi\s+|nixi\s+)", "", lower).strip()
 
-        # 2. Timer / Reminder: e.g. "set timer for 5 minutes", "timer 30 seconds"
-        timer_match = re.search(r"(?:timer|remind me)(?:\s+for)?\s+(\d+)\s*(min|minute|sec|second|hour)s?", lower)
-        if timer_match:
-            val = int(timer_match.group(1))
-            unit = timer_match.group(2)
-            sec = val if "sec" in unit else (val * 60 if "min" in unit else val * 3600)
-            label = f"{val} {unit} timer"
-            self.timer_mgr.add_timer(sec, label, on_complete=self._on_timer_done)
-            ack = f"Timer set for {val} {unit}s."
-            self.bridge.status_changed.emit(ack, "happy")
-            self.bridge.chat_message_received.emit(ack, False)
-            self.tts.speak(ack)
-            self._delayed_status("Idle", "happy", 2.5)
-            return
+                # 1. Dictation toggle
+                if clean in ("start dictation", "dictate", "dictation on"):
+                    self.dictation.set_active(True)
+                    self.tts.speak("Dictation on")
+                    self.bridge.status_changed.emit("Dictating...", "listening")
+                    return
+                elif clean in ("stop dictation", "dictation off"):
+                    self.dictation.set_active(False)
+                    self.tts.speak("Dictation off")
+                    self.bridge.status_changed.emit("Idle", "happy")
+                    return
 
-        # 3. Dedicated App Launcher
-        open_match = re.search(r"^(?:open|launch|start)\s+([a-zA-Z0-9\s]+)$", lower)
-        if open_match and not ("http" in lower or ".com" in lower or "web" in lower or "youtube" in lower or "github" in lower):
-            app_target = open_match.group(1).strip()
-            ok, msg = self.app_launcher.launch(app_target)
-            if ok:
-                self.bridge.status_changed.emit(msg, "happy")
-                self.bridge.chat_message_received.emit(msg, False)
-                self.tts.speak(msg)
+                # 2. Timer / Reminder: e.g. "set timer for 5 minutes", "timer 30 seconds"
+                timer_match = re.search(r"(?:timer|remind me)(?:\s+for)?\s+(\d+)\s*(min|minute|sec|second|hour)s?", clean)
+                if timer_match:
+                    val = int(timer_match.group(1))
+                    unit = timer_match.group(2)
+                    sec = val if "sec" in unit else (val * 60 if "min" in unit else val * 3600)
+                    label = f"{val} {unit} timer"
+                    self.timer_mgr.add_timer(sec, label, on_complete=self._on_timer_done)
+                    ack = f"Timer set for {val} {unit}s."
+                    self.bridge.status_changed.emit(ack, "happy")
+                    self.bridge.chat_message_received.emit(ack, False)
+                    self.tts.speak(ack)
+                    self._delayed_status("Idle", "happy", 2.5)
+                    return
+
+                # 3. Dedicated App Launcher
+                open_match = re.search(r"^(?:open|launch|start)\s+(?:the\s+)?([a-zA-Z0-9\s]+)$", clean)
+                if open_match and not ("http" in clean or ".com" in clean or "web" in clean or "youtube" in clean or "github" in clean or "reddit" in clean):
+                    app_target = open_match.group(1).strip()
+                    ok, msg = self.app_launcher.launch(app_target)
+                    if ok:
+                        self.bridge.status_changed.emit(msg, "happy")
+                        self.bridge.chat_message_received.emit(msg, False)
+                        self.tts.speak(msg)
+                        self._delayed_status("Idle", "happy", 2.5)
+                        return
+
+                # 4. God-Mode Agent (System, Media, Windows, Shell, Web Search, Popular Sites)
+                handled, result = self.god_agent.process_command(cmd, on_voice_feedback=lambda msg: self.tts.speak(msg))
+                if handled:
+                    self.bridge.status_changed.emit("Done", "happy")
+                    self.bridge.chat_message_received.emit(result, False)
+                    self.tts.speak(result)
+                    self._delayed_status("Idle", "happy", 2.5)
+                    return
+
+                # 5. General LLM Query with concurrent sentence-by-sentence voice streaming
+                self._ask_llm(cmd)
+            except Exception as e:
+                err_text = f"Notice: {e}"
+                self.bridge.chat_message_received.emit(err_text, False)
+                self.tts.speak(err_text)
                 self._delayed_status("Idle", "happy", 2.5)
-                return
 
-        # 4. God-Mode Agent (System, Media, Windows, Shell, Web Search, Screen Form Automation, Files)
-        handled, result = self.god_agent.process_command(cmd, on_voice_feedback=lambda msg: self.tts.speak(msg))
-        if handled:
-            self.bridge.status_changed.emit("Done", "happy")
-            self.bridge.chat_message_received.emit(result, False)
-            self.tts.speak(result)
-            self._delayed_status("Idle", "happy", 2.5)
-            return
-
-        # 5. General LLM Query with concurrent sentence-by-sentence voice streaming
-        self._ask_llm(cmd)
+        threading.Thread(target=runner, daemon=True).start()
 
     def _on_timer_done(self, label: str):
         msg = f"⏰ Time is up! ({label})"

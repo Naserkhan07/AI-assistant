@@ -18,6 +18,8 @@ import glob
 import webbrowser
 import psutil
 import pyautogui
+pyautogui.FAILSAFE = False
+pyautogui.PAUSE = 0.02
 from typing import Dict, Any, List, Optional, Tuple
 
 try:
@@ -219,21 +221,21 @@ class SystemOps:
 
     @staticmethod
     def exa_search(query: str, num_results: int = 3) -> List[Dict[str, str]]:
-        """Search the web using Exa Neural Search API with highlights and live content."""
+        """Search the web using Exa Neural Search API with sub-second latency."""
         api_key = os.getenv("EXA_API_KEY", "16eb355e-7c10-4429-be29-2653a896a43f")
         if not api_key:
             return []
         try:
             from exa_py import Exa
             exa = Exa(api_key=api_key)
-            res = exa.search(query, type="auto", num_results=num_results, contents={"highlights": True})
+            res = exa.search(query, num_results=num_results)
             results = []
             for r in res.results:
-                highlight_text = " ".join(r.highlights) if r.highlights else ""
+                snippet = (r.text[:300].strip().replace("\n", " ") if hasattr(r, 'text') and r.text else "")
                 results.append({
                     "title": r.title or "",
                     "url": r.url or "",
-                    "snippet": highlight_text or (r.text[:300] if hasattr(r, 'text') and r.text else "")
+                    "snippet": snippet
                 })
             return results
         except Exception as e:
