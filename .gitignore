@@ -1,0 +1,60 @@
+# ==========================================
+# Nixi AI Assistant - Git Ignore
+# ==========================================
+
+# Virtual Environments
+.venv/
+app/.venv/
+env/
+venv/
+ENV/
+
+# Secrets and Local Environment Files
+.env
+app/.env
+*.env
+!.env.example
+
+# Python Cache & Build Artifacts
+__pycache__/
+*/__pycache__/
+*/*/__pycache__/
+*/*/*/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+
+# Legacy Mark-LVI folder & third-party repos
+app/
+repos/
+
+# Node.js / FreeLLMAPI dependencies & databases
+node_modules/
+repos/freellmapi/node_modules/
+repos/freellmapi/dist/
+repos/freellmapi/server/data/
+repos/freellmapi/server/dist/db/*.sqlite
+repos/freellmapi/server/dist/db/*.db
+repos/freellmapi/server/dist/db/*.db-wal
+repos/freellmapi/server/dist/db/*.db-shm
+repos/freellmapi/.encryption-key
+repos/freellmapi/.env
+repos/freellmapi/.env.local
+
+# Audio & Temporary scratch files
+*.mp3
+*.wav
+scratch/
+scratch_*/
+*.tmp
+*.log
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

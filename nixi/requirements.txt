@@ -1,0 +1,15 @@
+# Nixi Assistant Core Dependencies
+PyQt6>=6.6,<7
+sounddevice>=0.4,<1
+numpy>=1.24,<3
+httpx>=0.27,<1
+pyautogui
+pyperclip
+pillow>=10,<13
+mss>=9,<11
+
+# Speech Recognition & TTS
+faster-whisper
+speechrecognition
+pyttsx3
+keyboard
