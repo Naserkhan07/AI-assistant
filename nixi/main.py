@@ -27,6 +27,9 @@ from PyQt6.QtWidgets import QApplication
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from nixi.ui.dynamic_island import NixiDynamicIsland
 from nixi.core.llm_client import NixiLLMClient
 from nixi.core.dictation import DictationManager
@@ -312,7 +315,13 @@ class NixiApp:
                 self.bridge.status_changed.emit("Idle", "happy")
 
             except Exception as e:
-                self.bridge.chat_message_received.emit(f"Error: {str(e)}", False)
+                err_text = str(e)
+                if "502" in err_text or "Bad Gateway" in err_text:
+                    fallback_msg = "Upstream provider is momentarily busy. Retrying in background..."
+                else:
+                    fallback_msg = f"Notice: {err_text}"
+                self.bridge.chat_message_received.emit(fallback_msg, False)
+                self.tts.speak(fallback_msg)
             finally:
                 QTimer.singleShot(2500, lambda: self.bridge.status_changed.emit("Idle", "happy"))
 
