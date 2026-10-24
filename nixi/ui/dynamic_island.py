@@ -12,7 +12,7 @@ import os
 import re
 from typing import Optional
 from PyQt6.QtCore import (
-    Qt, QRect, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QPoint
+    Qt, QRect, QRectF, QPoint, QPointF, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve
 )
 from PyQt6.QtGui import (
     QPainter, QColor, QRadialGradient, QLinearGradient, QPen, QBrush, QFont, QCursor, QPainterPath
