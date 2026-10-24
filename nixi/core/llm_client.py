@@ -14,16 +14,16 @@ DEFAULT_BASE_URL = os.getenv("FREELLMAPI_URL", "http://127.0.0.1:3001/v1")
 DEFAULT_API_KEY = os.getenv("FREELLMAPI_KEY", "dummy-key")
 DEFAULT_MODEL = os.getenv("FREELLMAPI_MODEL", "auto:fast")
 
-SYSTEM_PROMPT = """You are Nixi, an ultra-fast, sleek, direct Windows AI assistant.
-Keep answers natural, crisp, and direct (1-2 short sentences maximum).
-Do not use bullet points or markdown styling."""
+SYSTEM_PROMPT = """You are Nixi, an ultra-fast Windows AI desktop assistant.
+Respond immediately in 1-2 punchy, direct sentences.
+Never use markdown, bullet points, or conversational filler."""
 
 class NixiLLMClient:
     def __init__(self, base_url: str = DEFAULT_BASE_URL, api_key: str = DEFAULT_API_KEY, model: str = DEFAULT_MODEL):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
-        self.client = httpx.Client(timeout=18.0)
+        self.client = httpx.Client(timeout=15.0)
 
     def is_online(self) -> bool:
         """Check if FreeLLMAPI or endpoint is reachable."""
@@ -33,7 +33,7 @@ class NixiLLMClient:
         except Exception:
             return False
 
-    def chat_stream(self, messages: List[Dict[str, Any]], temperature: float = 0.4) -> Generator[str, None, None]:
+    def chat_stream(self, messages: List[Dict[str, Any]], temperature: float = 0.25) -> Generator[str, None, None]:
         """Stream response chunks from the LLM with minimal latency."""
         url = f"{self.base_url}/chat/completions"
         headers = {
@@ -46,7 +46,7 @@ class NixiLLMClient:
             "model": self.model,
             "messages": full_messages,
             "temperature": temperature,
-            "max_tokens": 140,
+            "max_tokens": 100,
             "stream": True,
         }
 
