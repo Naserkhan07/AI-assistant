@@ -618,9 +618,11 @@ class NixiDynamicIsland(QWidget):
     send_query_signal = pyqtSignal(str)
     dictate_toggled_signal = pyqtSignal(bool)
     screen_vision_signal = pyqtSignal()
+    screen_always_signal = pyqtSignal(bool)
 
     def __init__(self):
         super().__init__()
+        self.is_screen_always_on = True
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
@@ -755,7 +757,7 @@ class NixiDynamicIsland(QWidget):
             ("⚡ Fill Form", "fill these boxes"),
             ("🌐 Search Web", "search the web for "),
             ("💻 PowerShell", "run powershell dir"),
-            ("👁️ See Screen", "read screen"),
+            ("👁️ See Screen", "see my screen"),
             ("🔇 Mute", "mute"),
             ("🖥️ Desktop", "show desktop"),
         ]
@@ -777,12 +779,14 @@ class NixiDynamicIsland(QWidget):
         self.input_field.returnPressed.connect(self._on_send)
         input_row.addWidget(self.input_field)
 
-        # Screen Seeing Button
+        # Screen Seeing Button (Always See Screen Mode - Default ON)
         self.screen_btn = QToolButton()
         self.screen_btn.setObjectName("ToolBtn")
         self.screen_btn.setText("👁️")
-        self.screen_btn.setToolTip("See Screen & Execute")
-        self.screen_btn.clicked.connect(lambda: self.screen_vision_signal.emit())
+        self.screen_btn.setCheckable(True)
+        self.screen_btn.setChecked(True)
+        self.screen_btn.setToolTip("Always Seeing Screen: ON (Nixi sees your screen with every prompt. Click to toggle)")
+        self.screen_btn.toggled.connect(self._on_screen_always_toggled)
         input_row.addWidget(self.screen_btn)
 
         # Mic / Dictate Button
@@ -879,6 +883,16 @@ class NixiDynamicIsland(QWidget):
     def _on_pin_toggled(self, checked: bool):
         self.is_pinned = checked
         self.pin_btn.setText("📌" if checked else "📍")
+
+    def _on_screen_always_toggled(self, checked: bool):
+        self.is_screen_always_on = checked
+        if checked:
+            self.screen_btn.setToolTip("Always Seeing Screen: ON (Nixi sees your screen with every prompt. Click to toggle)")
+            self.set_status("Vision ON", "happy")
+        else:
+            self.screen_btn.setToolTip("Always Seeing Screen: OFF (Click to turn on live screen vision)")
+            self.set_status("Vision OFF", "happy")
+        self.screen_always_signal.emit(checked)
 
     def _on_chip_clicked(self, cmd: str):
         if cmd.endswith(" "):

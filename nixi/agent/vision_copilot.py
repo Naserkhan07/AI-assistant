@@ -37,7 +37,7 @@ class VisionCopilot:
             "```[language]\n[corrected code or terminal command]\n```"
         )
 
-        return self.llm.analyze_screen(img_bytes, prompt=prompt)
+        return self.llm.analyze_screen(img_bytes, prompt=prompt, max_tokens=900)
 
     def extract_screen_table_or_data(self, query: str = "") -> Tuple[str, str]:
         """Captures screen, extracts structured table/infographic data, and saves to Desktop as CSV/Markdown."""
@@ -46,14 +46,17 @@ class VisionCopilot:
             return "Unable to capture screen for extraction.", ""
 
         prompt = (
-            "You are an expert OCR and data extraction agent. Look at this screen capture.\n"
-            "Task: Extract all structured tabular, chart, or infographic data visible into a clean GitHub Markdown table.\n"
-            "Do not include conversational preamble. Return only the markdown table or list of structured data."
+            "You are Nixi, an expert OCR, diagram, and structured data extraction engine. Look at this screen capture.\n"
+            "Task: Extract the table, flowchart, architecture diagram, or structured data visible on screen.\n"
+            f"User Context: {query or 'Extract the table or diagram on screen.'}\n"
+            "If it is a table, format as a clean GitHub Markdown table.\n"
+            "If it is a diagram or flowchart, transcribe the nodes and relationships in a structured Markdown format.\n"
+            "Do not include conversational preamble. Return only the extracted markdown structure."
         )
 
-        markdown_table = self.llm.analyze_screen(img_bytes, prompt=prompt)
+        markdown_table = self.llm.analyze_screen(img_bytes, prompt=prompt, max_tokens=1000)
 
-        # Attempt to save a CSV copy to Desktop
+        # Attempt to save a markdown copy to Desktop
         saved_file = ""
         try:
             desktop = os.path.join(os.path.expanduser("~"), "Desktop")

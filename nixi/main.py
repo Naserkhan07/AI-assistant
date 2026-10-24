@@ -20,6 +20,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 import re
 import threading
 import time
+import base64
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtWidgets import QApplication
@@ -139,6 +140,7 @@ class NixiApp:
         self.island.send_query_signal.connect(self._execute_command_text)
         self.island.dictate_toggled_signal.connect(self._toggle_dictation)
         self.island.screen_vision_signal.connect(self._handle_screen_vision)
+        self.island.screen_always_signal.connect(self._on_screen_always_toggled)
         self.bridge.command_signal.connect(self._execute_command_text)
 
         # Proactive Daemons to UI
@@ -169,6 +171,10 @@ class NixiApp:
                 pass
         t = threading.Thread(target=listen, daemon=True)
         t.start()
+
+    def _on_screen_always_toggled(self, enabled: bool):
+        state = "on" if enabled else "off"
+        self.tts.speak(f"Screen vision {state}")
 
     def _toggle_dictation(self, enabled: bool):
         self.dictation.set_active(enabled)
@@ -263,8 +269,21 @@ class NixiApp:
                     self._delayed_status("Idle", "happy", 4.0)
                     return
 
-                # 0c. Visual Debugging and Screen Extraction
-                if any(k in clean for k in ("debug my code", "debug screen", "explain error on screen", "find bug on screen", "visual debug", "fix my code on screen")):
+                # 0c. Visual Debugging, Screen Extraction, and Live Screen Perception
+                is_extract_query = any(k in clean for k in ("table", "diagram", "chart", "infographic", "flowchart", "graph", "architecture")) and any(k in clean for k in ("extract", "get", "convert", "save", "markdown", "read", "copy", "summarize", "show", "export"))
+                if is_extract_query or any(k in clean for k in ("extract table", "extract the table", "extract diagram", "extract the diagram", "extract chart", "screen to markdown", "extract screen data")):
+                    self.bridge.status_changed.emit("Extracting...", "thinking")
+                    self.tts.speak("Extracting structured visual data from screen.")
+                    table_md, saved_f = self.vision_copilot.extract_screen_table_or_data(clean)
+                    res_msg = f"{table_md}\n\n📁 Saved to {saved_f}" if saved_f else table_md
+                    self.bridge.chat_message_received.emit(res_msg, False)
+                    self.tts.speak("Visual data extracted and saved to Desktop.")
+                    self.bridge.status_changed.emit("Extraction Done", "happy")
+                    self._delayed_status("Idle", "happy", 3.0)
+                    return
+
+                is_debug_query = any(k in clean for k in ("debug my code", "debug screen", "explain error", "find bug", "visual debug", "fix my code", "what is this error", "why is this failing"))
+                if is_debug_query:
                     self.bridge.status_changed.emit("Debugging screen...", "thinking")
                     self.tts.speak("Analyzing screen for bugs.")
                     diag = self.vision_copilot.debug_active_screen(clean)
@@ -274,15 +293,9 @@ class NixiApp:
                     self.bridge.status_changed.emit("Debug Complete", "happy")
                     self._delayed_status("Idle", "happy", 3.0)
                     return
-                elif any(k in clean for k in ("extract table", "extract chart", "extract screen data", "screen to markdown", "extract infographic")):
-                    self.bridge.status_changed.emit("Extracting table...", "thinking")
-                    self.tts.speak("Extracting structured data from screen.")
-                    table_md, saved_f = self.vision_copilot.extract_screen_table_or_data(clean)
-                    res_msg = f"{table_md}\n\n📁 Saved to {saved_f}" if saved_f else table_md
-                    self.bridge.chat_message_received.emit(res_msg, False)
-                    self.tts.speak("Data extracted and saved to Desktop.")
-                    self.bridge.status_changed.emit("Extraction Done", "happy")
-                    self._delayed_status("Idle", "happy", 3.0)
+
+                if any(k in clean for k in ("see my screen", "see screen", "look at my screen", "read my screen", "what is on my screen", "what's on my screen", "what am i looking at", "what do you see", "can you see my screen", "can you see this", "describe my screen", "what window")):
+                    self._handle_screen_vision(prompt=cmd)
                     return
 
                 # 0d. Multi-Step Goal Decomposition & Autonomous ReAct Execution Loop
@@ -400,8 +413,8 @@ class NixiApp:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _handle_screen_vision(self):
-        """Take screenshot and send to Vision LLM."""
+    def _handle_screen_vision(self, prompt: str = ""):
+        """Take screenshot and send to Vision LLM with live direct perception."""
         self.tts.stop()
         self.bridge.status_changed.emit("Analyzing screen...", "thinking")
         self.tts.speak("Checking screen.", interrupt_previous=True)
@@ -413,7 +426,8 @@ class NixiApp:
             try:
                 time.sleep(0.06)
                 img_bytes = self.screen_reader.capture_screen()
-                analysis = self.llm.analyze_screen(img_bytes)
+                p = prompt if prompt else "Describe what is on my screen in 1-2 concise sentences."
+                analysis = self.llm.analyze_screen(img_bytes, prompt=p, max_tokens=800)
                 
                 self.bridge.expand_island_signal.emit()
                 self.bridge.chat_message_received.emit(analysis, False)
@@ -428,9 +442,38 @@ class NixiApp:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _is_visual_query(self, text: str) -> bool:
+        lower = text.lower()
+        triggers = (
+            "screen", "look at", "see", "what is this", "what's this", "what am i looking at",
+            "what do you see", "can you see", "visible", "on my screen", "read this",
+            "summarize this", "debug this", "extract", "table", "diagram", "chart",
+            "infographic", "flowchart", "architecture", "what window", "active window"
+        )
+        return any(trig in lower for trig in triggers)
+
     def _ask_llm(self, query: str):
-        """Stream message from FreeLLMAPI in real time with concurrent sentence-by-sentence voice output."""
+        """Stream message from FreeLLMAPI in real time with concurrent sentence-by-sentence voice output and live screen vision."""
         self.tts.stop()
+
+        # Check if live screen vision should be included (Always-On mode OR visual intent)
+        include_screen = getattr(self.island, "is_screen_always_on", True) or self._is_visual_query(query)
+        img_bytes = None
+        if include_screen:
+            try:
+                img_bytes = self.screen_reader.capture_screen(max_dimension=900)
+            except Exception:
+                img_bytes = None
+
+        if img_bytes:
+            b64_img = base64.b64encode(img_bytes).decode("utf-8")
+            user_turn_content = [
+                {"type": "text", "text": query},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}}
+            ]
+        else:
+            user_turn_content = query
+
         self.conversation_history.append({"role": "user", "content": query})
         if len(self.conversation_history) > 10:
             self.conversation_history = self.conversation_history[-10:]
@@ -440,7 +483,13 @@ class NixiApp:
         stream_messages = []
         if mem_prompt:
             stream_messages.append({"role": "system", "content": mem_prompt})
-        stream_messages.extend(self.conversation_history)
+
+        # Add history text (without obsolete images to preserve performance)
+        for h in self.conversation_history[:-1]:
+            stream_messages.append(h)
+
+        # Current turn with live image context
+        stream_messages.append({"role": "user", "content": user_turn_content})
 
         def worker():
             collected = []

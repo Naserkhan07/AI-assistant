@@ -6,6 +6,7 @@ Automatically handles 502/429/500/504 errors by failing over across healthy free
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 import json
 import base64
@@ -24,9 +25,12 @@ DEFAULT_BASE_URL = os.getenv("FREELLMAPI_URL", "http://127.0.0.1:3001/v1")
 DEFAULT_API_KEY = os.getenv("FREELLMAPI_KEY", "")
 DEFAULT_MODEL = os.getenv("FREELLMAPI_MODEL", "mistral-nemo")
 
-SYSTEM_PROMPT = """You are Nixi, an ultra-fast Windows AI desktop assistant.
+SYSTEM_PROMPT = """You are Nixi, an ultra-fast Windows AI desktop assistant and autonomous agent.
+You have direct, real-time live vision access to the user's screen, active windows, IDE, and web pages.
+Whenever asked about what is visible on the screen, diagrams, code, tables, or active windows, answer directly with visual awareness.
+Never say 'I cannot see your screen' or suggest external tools, because you have native screen vision.
 Respond immediately in 1-2 punchy, direct sentences.
-Never use markdown, bullet points, or conversational filler."""
+Avoid conversational filler."""
 
 class NixiLLMClient:
     def __init__(self, base_url: str = DEFAULT_BASE_URL, api_key: str = DEFAULT_API_KEY, model: str = DEFAULT_MODEL):
@@ -46,6 +50,10 @@ class NixiLLMClient:
             return r.status_code in (200, 401, 403)
         except Exception:
             return False
+
+    def _get_vision_candidate_models(self) -> List[str]:
+        """Returns ordered list of verified multimodal models capable of processing images."""
+        return ["auto", "claude-haiku-4-5", "claude-sonnet-4-5", "free-router"]
 
     def _get_candidate_models(self) -> List[str]:
         """Returns ordered list of verified free models to try in case of 502/429 upstream errors."""
@@ -79,7 +87,17 @@ class NixiLLMClient:
         }
         
         full_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
-        models_to_try = self._get_candidate_models()
+
+        has_image = any(
+            isinstance(m.get("content"), list) and any(
+                isinstance(part, dict) and part.get("type") == "image_url"
+                for part in m.get("content", [])
+            )
+            for m in messages
+        )
+
+        models_to_try = self._get_vision_candidate_models() if has_image else self._get_candidate_models()
+        max_tokens = 800 if has_image else 120
         has_streamed = False
 
         for model_name in models_to_try:
@@ -87,7 +105,7 @@ class NixiLLMClient:
                 "model": model_name,
                 "messages": full_messages,
                 "temperature": temperature,
-                "max_tokens": 120,
+                "max_tokens": max_tokens,
                 "stream": True,
             }
 
@@ -167,8 +185,8 @@ class NixiLLMClient:
 
             yield "All cloud model endpoints are temporarily busy. I am ready to help with local tasks, system controls, and web search."
 
-    def analyze_screen(self, image_bytes: bytes, prompt: str = "Describe what is on my screen in 1-2 concise sentences.") -> str:
-        """Fast screen analysis with automatic multi-model failover."""
+    def analyze_screen(self, image_bytes: bytes, prompt: str = "Describe what is on my screen in 1-2 concise sentences.", max_tokens: int = 800) -> str:
+        """Fast screen analysis with automatic multimodal model failover and direct visual perception."""
         url = f"{self.base_url}/chat/completions"
         headers = {
             "Content-Type": "application/json",
@@ -176,8 +194,15 @@ class NixiLLMClient:
         }
 
         b64_img = base64.b64encode(image_bytes).decode("utf-8")
+        vision_system = (
+            "You are Nixi, an AI desktop assistant with live native screen vision perception.\n"
+            "You have direct sight of the user's active screen, IDE, browser, diagrams, and applications.\n"
+            "Never say you cannot see the screen or suggest snipping tools, because you see the screen directly.\n"
+            "Do NOT output thinking process, internal monologue, or analysis reasoning tags. Answer immediately with the final answer."
+        )
+
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": vision_system},
             {
                 "role": "user",
                 "content": [
@@ -190,21 +215,29 @@ class NixiLLMClient:
             }
         ]
 
-        models_to_try = self._get_candidate_models()
+        models_to_try = self._get_vision_candidate_models()
         for model_name in models_to_try:
             payload = {
                 "model": model_name,
                 "messages": messages,
                 "temperature": 0.2,
-                "max_tokens": 140,
+                "max_tokens": max_tokens,
             }
 
             try:
-                resp = self.client.post(url, headers=headers, json=payload, timeout=12.0)
+                resp = self.client.post(url, headers=headers, json=payload, timeout=20.0)
                 if resp.status_code == 200:
                     data = resp.json()
                     content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
                     if content and not content.startswith("Error"):
+                        # Clean out thinking tags or reasoning sections if present
+                        if "<think>" in content:
+                            content = content.split("</think>")[-1].strip()
+                        if "Thinking Process:" in content:
+                            parts = [p.strip() for p in content.split("\n\n") if p.strip()]
+                            non_think = [p for p in parts if not p.startswith("Thinking Process:") and not re.match(r"^\d+\.\s+", p)]
+                            if non_think:
+                                content = "\n\n".join(non_think).strip()
                         return content
             except Exception:
                 continue
