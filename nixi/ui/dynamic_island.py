@@ -81,13 +81,26 @@ class AudioWaveWidget(QWidget):
             painter.drawRoundedRect(rect, 1.5, 1.5)
 
 
-class CuteEyesWidget(QWidget):
-    """Two cute glowing animated eyes with rich multi-emotion expressions."""
+class StylizedCartoonEyes(QWidget):
+    """
+    Stylized Cartoon Eyes matching user reference design:
+    - High contrast pure white contours with deep black pupils
+    - 5 Distinct expressions from reference sheet:
+        1. 'cat_slit': Almond feline eye with vertical slit pupil (Row 1 Col 2 / Row 2 Col 3)
+        2. 'determined': Angled anime brow with focused pupil (Row 2 Col 1)
+        3. 'horned': Pointed curved horns with inner pupil cutout (Row 1 Col 1 / Col 3)
+        4. 'half_moon': Flat-top focused eye with circular pupil & catchlight glint (Row 4 Col 2)
+        5. 'crescent': Expressive curved smiling crescent (Row 3 Col 1 & Col 2)
+    - Audio pulse reactivity, smooth blinking, and click-to-cycle style switcher.
+    """
+    STYLES = ["cat_slit", "determined", "horned", "half_moon", "crescent"]
+
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.setFixedSize(56, 26)
+        self.setFixedSize(58, 26)
         self.is_blinking = False
-        self.eye_state = "happy"  # "happy", "listening", "thinking", "speaking", "surprised", "winking"
+        self.eye_state = "idle"
+        self.style_idx = 0  # Default to cat_slit
         self.phase = 0.0
         self.audio_pulse = 0.0
 
@@ -96,10 +109,19 @@ class CuteEyesWidget(QWidget):
         self.anim_timer.timeout.connect(self._animate)
         self.anim_timer.start(33)
 
-        # Periodic blink timer (every 3.5 seconds)
+        # Periodic blink timer (every 3.8s)
         self.blink_timer = QTimer(self)
         self.blink_timer.timeout.connect(self._trigger_blink)
-        self.blink_timer.start(3500)
+        self.blink_timer.start(3800)
+
+    def mousePressEvent(self, event):
+        """Clicking on eyes toggles through styles from the reference image!"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.style_idx = (self.style_idx + 1) % len(self.STYLES)
+            self.update()
+            event.accept()
+        else:
+            super().mousePressEvent(event)
 
     def _animate(self):
         self.phase = (self.phase + 0.1) % (2 * math.pi)
@@ -109,19 +131,33 @@ class CuteEyesWidget(QWidget):
         if self.eye_state not in ("thinking", "speaking"):
             self.is_blinking = True
             self.update()
-            QTimer.singleShot(160, self._end_blink)
+            QTimer.singleShot(150, self._end_blink)
 
     def _end_blink(self):
         self.is_blinking = False
         self.update()
 
     def set_eye_state(self, state: str):
-        self.eye_state = state
+        self.eye_state = state.lower()
         self.update()
 
     def set_audio_pulse(self, lvl: float):
-        self.audio_pulse = lvl
+        self.audio_pulse = max(0.0, min(1.0, lvl))
         self.update()
+
+    def _get_active_style(self) -> str:
+        # State-driven expression mapping, or falls back to user-selected style
+        if self.eye_state in ("thinking", "scanning"):
+            return "half_moon"
+        elif self.eye_state in ("listening", "alert"):
+            return "horned"
+        elif self.eye_state in ("guardian", "angry", "determined"):
+            return "determined"
+        elif self.eye_state in ("happy", "done", "complete"):
+            return "crescent"
+        elif self.eye_state == "speaking":
+            return "cat_slit"
+        return self.STYLES[self.style_idx]
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -130,105 +166,150 @@ class CuteEyesWidget(QWidget):
 
         w, h = self.width(), self.height()
         cy = h / 2.0
-
-        # Eye color palette based on state
-        if self.eye_state == "listening":
-            base_col = QColor(168, 85, 247)  # Electric Purple
-        elif self.eye_state == "thinking":
-            base_col = QColor(236, 72, 153)  # Hot Pink / Magenta
-        elif self.eye_state == "speaking":
-            base_col = QColor(56, 189, 248)  # Cyan
-        elif self.eye_state == "surprised":
-            base_col = QColor(239, 68, 68)   # Coral Red
-        else:
-            base_col = QColor(245, 158, 11)   # Warm Amber / Gold
-
         left_cx = 17.0
         right_cx = w - 17.0
 
-        pulse = (math.sin(self.phase) + 1.0) * 0.5
-        eye_w = 11.0 + (pulse * 1.5) + (self.audio_pulse * 4.0)
-        eye_h = 7.0 if not self.is_blinking else 1.5
+        hw = 9.5
+        hh = 7.0
+
+        # Ambient aura glow behind the eyes
+        if self.eye_state == "listening":
+            glow_col = QColor(168, 85, 247, 90)   # Purple
+        elif self.eye_state in ("thinking", "half_moon"):
+            glow_col = QColor(236, 72, 153, 90)   # Magenta
+        elif self.eye_state == "speaking":
+            glow_col = QColor(56, 189, 248, 110)  # Cyan
+        elif self.eye_state in ("guardian", "determined"):
+            glow_col = QColor(239, 68, 68, 90)    # Crimson
+        else:
+            glow_col = QColor(245, 158, 11, 85)   # Amber Gold
+
+        active_style = self._get_active_style()
 
         for i, cx in enumerate((left_cx, right_cx)):
-            # Outer Radial Glow
-            glow = QRadialGradient(cx, cy, 14.0)
-            c_g = QColor(base_col)
-            c_g.setAlpha(130)
-            glow.setColorAt(0.0, c_g)
-            c_fade = QColor(base_col)
+            mirror = -1.0 if i == 1 else 1.0
+
+            # Subtle breathing glow
+            pulse = (math.sin(self.phase) + 1.0) * 0.5
+            glow_r = 13.0 + (pulse * 2.0) + (self.audio_pulse * 4.0)
+            glow = QRadialGradient(cx, cy, glow_r)
+            glow.setColorAt(0.0, glow_col)
+            c_fade = QColor(glow_col)
             c_fade.setAlpha(0)
             glow.setColorAt(1.0, c_fade)
             painter.setBrush(QBrush(glow))
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawEllipse(QRect(int(cx - 13), int(cy - 11), 26, 22))
+            painter.drawEllipse(QRectF(cx - glow_r, cy - glow_r, glow_r * 2, glow_r * 2))
 
-            # Check wink state: if winking, right eye is closed
-            is_eye_winked = (self.eye_state == "winking" and i == 1)
+            painter.save()
+            painter.translate(cx, cy)
 
-            path = QPainterPath()
-            if self.is_blinking or is_eye_winked:
-                # Closed blinking eye line
-                path.moveTo(cx - 6, cy)
-                path.lineTo(cx + 6, cy)
-                pen = QPen(base_col, 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+            # Eyelid closed in blink
+            if self.is_blinking:
+                pen = QPen(QColor(255, 255, 255, 240), 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
                 painter.setPen(pen)
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawPath(path)
+                painter.drawLine(int(-hw * 0.85), 0, int(hw * 0.85), 0)
+                painter.restore()
+                continue
 
-            elif self.eye_state == "speaking":
-                # Undulating playful wave eye ~
-                wave_off = math.sin(self.phase * 2.0 + i) * 2.0
-                path.moveTo(cx - 6, cy + wave_off)
-                path.cubicTo(cx - 2, cy - 4 + wave_off, cx + 2, cy + 4 + wave_off, cx + 6, cy + wave_off)
-                pen = QPen(base_col, 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
-                painter.setPen(pen)
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawPath(path)
+            eye_path = QPainterPath()
 
-            elif self.eye_state == "thinking":
-                # Focused scanning eye > <
-                dx = math.sin(self.phase * 3.0) * 2.0
-                if i == 0:
-                    path.moveTo(cx - 5 + dx, cy - 4)
-                    path.lineTo(cx + 4 + dx, cy)
-                    path.lineTo(cx - 5 + dx, cy + 4)
-                else:
-                    path.moveTo(cx + 5 + dx, cy - 4)
-                    path.lineTo(cx - 4 + dx, cy)
-                    path.lineTo(cx + 5 + dx, cy + 4)
-                pen = QPen(base_col, 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
-                painter.setPen(pen)
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawPath(path)
+            if active_style == "cat_slit":
+                # Almond cat eye with sharp outer wing
+                eye_path.moveTo(-hw * mirror, 0)
+                eye_path.cubicTo(-hw * 0.35 * mirror, -hh * 1.15, hw * 0.35 * mirror, -hh * 1.15, hw * mirror, 0)
+                eye_path.cubicTo(hw * 0.35 * mirror, hh * 1.15, -hw * 0.35 * mirror, hh * 1.15, -hw * mirror, 0)
+                eye_path.closeSubpath()
 
-            elif self.eye_state == "surprised":
-                # Wide open circular eye O
-                painter.setPen(QPen(QColor(255, 255, 255, 220), 1.0))
-                painter.setBrush(QBrush(base_col))
-                painter.drawEllipse(QRect(int(cx - 6), int(cy - 6), 12, 12))
+                painter.setPen(QPen(QColor(255, 255, 255, 240), 0.8))
+                painter.setBrush(QBrush(QColor(255, 255, 255)))
+                painter.drawPath(eye_path)
 
-            elif self.eye_state == "listening":
-                # Glowing alert circle •
+                # Vertical feline slit pupil that dilates with audio
+                slit_w = 2.4 + (self.audio_pulse * 2.8)
+                slit_h = hh * 1.6
+                pupil_path = QPainterPath()
+                pupil_path.addRoundedRect(QRectF(-slit_w / 2.0, -slit_h / 2.0, slit_w, slit_h), slit_w / 2.0, slit_w / 2.0)
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QBrush(base_col))
-                r_size = 5.0 + (pulse * 2.0)
-                painter.drawEllipse(QRect(int(cx - r_size), int(cy - r_size), int(r_size * 2), int(r_size * 2)))
+                painter.setBrush(QBrush(QColor(10, 10, 14)))
+                painter.drawPath(pupil_path)
 
-            else:
-                # Default Happy curved arc ^
-                path.moveTo(cx - 6, cy + 2)
-                path.quadTo(cx, cy - eye_h, cx + 6, cy + 2)
-                path.quadTo(cx, cy - (eye_h * 0.4), cx - 6, cy + 2)
-                path.closeSubpath()
+            elif active_style == "determined":
+                # Slanted anime brow (Left slants down towards center)
+                eye_path.moveTo(-hw * mirror, -hh * 0.95)
+                eye_path.lineTo(hw * mirror, hh * 0.15)
+                eye_path.cubicTo(hw * 0.55 * mirror, hh * 1.15, -hw * 0.35 * mirror, hh * 1.15, -hw * mirror, -hh * 0.95)
+                eye_path.closeSubpath()
 
-                grad = QLinearGradient(cx, cy - eye_h, cx, cy + 2)
-                grad.setColorAt(0.0, QColor(255, 255, 255, 240))
-                grad.setColorAt(0.5, base_col)
-                grad.setColorAt(1.0, base_col.darker(140))
-                painter.setBrush(QBrush(grad))
-                painter.setPen(QPen(QColor(255, 255, 255, 140), 0.8))
-                painter.drawPath(path)
+                painter.setPen(QPen(QColor(255, 255, 255, 240), 0.8))
+                painter.setBrush(QBrush(QColor(255, 255, 255)))
+                painter.drawPath(eye_path)
+
+                # Focused pupil tucked under slanted brow
+                pupil_cx = hw * 0.32 * mirror
+                pupil_cy = hh * 0.22
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(QColor(10, 10, 14)))
+                painter.drawEllipse(QRectF(pupil_cx - 3.2, pupil_cy - 3.2, 6.4, 6.4))
+
+            elif active_style == "horned":
+                # Pointed horn/ear tip
+                eye_path.moveTo(-hw * 0.9 * mirror, hh * 0.5)
+                eye_path.cubicTo(-hw * 0.8 * mirror, -hh * 0.2, -hw * 0.3 * mirror, -hh * 1.35, -hw * 0.2 * mirror, -hh * 1.35)
+                eye_path.cubicTo(hw * 0.3 * mirror, -hh * 0.35, hw * 0.8 * mirror, -hh * 0.1, hw * 0.9 * mirror, hh * 0.5)
+                eye_path.cubicTo(0, hh * 1.15, -hw * 0.5 * mirror, hh * 0.9, -hw * 0.9 * mirror, hh * 0.5)
+                eye_path.closeSubpath()
+
+                painter.setPen(QPen(QColor(255, 255, 255, 240), 0.8))
+                painter.setBrush(QBrush(QColor(255, 255, 255)))
+                painter.drawPath(eye_path)
+
+                # Round pupil at bottom inner notch
+                pupil_cx = hw * 0.32 * mirror
+                pupil_cy = hh * 0.42
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(QColor(10, 10, 14)))
+                painter.drawEllipse(QRectF(pupil_cx - 2.8, pupil_cy - 2.8, 5.6, 5.6))
+
+            elif active_style == "half_moon":
+                # Flat top edge, deep rounded bowl
+                eye_path.moveTo(-hw * mirror, -hh * 0.35)
+                eye_path.lineTo(hw * mirror, -hh * 0.35)
+                eye_path.cubicTo(hw * 0.85 * mirror, hh * 1.2, -hw * 0.85 * mirror, hh * 1.2, -hw * mirror, -hh * 0.35)
+                eye_path.closeSubpath()
+
+                painter.setPen(QPen(QColor(255, 255, 255, 240), 0.8))
+                painter.setBrush(QBrush(QColor(255, 255, 255)))
+                painter.drawPath(eye_path)
+
+                # Scanning pupil with subtle left-right motion when thinking
+                scan_offset = math.sin(self.phase * 2.5) * 1.8 if self.eye_state in ("thinking", "scanning") else 0.0
+                pupil_cx = scan_offset
+                pupil_cy = hh * 0.25
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(QColor(10, 10, 14)))
+                painter.drawEllipse(QRectF(pupil_cx - 3.4, pupil_cy - 3.4, 6.8, 6.8))
+
+                # Catchlight highlight dot
+                painter.setBrush(QBrush(QColor(255, 255, 255)))
+                painter.drawEllipse(QRectF(pupil_cx + 1.2 * mirror - 0.9, pupil_cy - 1.2 - 0.9, 1.8, 1.8))
+
+            elif active_style == "crescent":
+                # Inverted smiling crescent
+                eye_path.moveTo(-hw * mirror, hh * 0.25)
+                eye_path.cubicTo(-hw * 0.4 * mirror, -hh * 0.85, hw * 0.4 * mirror, -hh * 0.85, hw * mirror, hh * 0.25)
+                eye_path.cubicTo(hw * 0.3 * mirror, -hh * 0.2, -hw * 0.3 * mirror, -hh * 0.2, -hw * mirror, hh * 0.25)
+                eye_path.closeSubpath()
+
+                painter.setPen(QPen(QColor(255, 255, 255, 240), 0.8))
+                painter.setBrush(QBrush(QColor(255, 255, 255)))
+                painter.drawPath(eye_path)
+
+            painter.restore()
+
+
+# Backwards compatibility alias
+CuteEyesWidget = StylizedCartoonEyes
 
 
 DYNAMIC_STYLE = """
@@ -479,8 +560,8 @@ class NixiDynamicIsland(QWidget):
         exp_layout.addWidget(self.scroll)
 
         # God-Mode Quick Action Chips Row
-        chips_layout = QHBoxLayout()
-        chips_layout.setSpacing(6)
+        self.chips_layout = QHBoxLayout()
+        self.chips_layout.setSpacing(6)
         chips = [
             ("⚡ Fill Form", "fill these boxes"),
             ("🌐 Search Web", "search the web for "),
@@ -494,8 +575,8 @@ class NixiDynamicIsland(QWidget):
             chip.setObjectName("ActionChip")
             chip.setCursor(Qt.CursorShape.PointingHandCursor)
             chip.clicked.connect(lambda ch, c=cmd_text: self._on_chip_clicked(c))
-            chips_layout.addWidget(chip)
-        exp_layout.addLayout(chips_layout)
+            self.chips_layout.addWidget(chip)
+        exp_layout.addLayout(self.chips_layout)
 
         # Bottom Input Bar Row (Text Input + Screen Eye + Mic + Send)
         input_row = QHBoxLayout()
@@ -651,3 +732,35 @@ class NixiDynamicIsland(QWidget):
 
     def set_response(self, text: str):
         self.response_label.setText(text)
+
+    def show_clipboard_chip(self, chip_info: dict):
+        """Displays a reactive glowing chip when clipboard detects a URL, code, or error."""
+        try:
+            label = chip_info.get("label", "⚡ Action")
+            action = chip_info.get("action", "")
+            preview = chip_info.get("preview", "")
+
+            if hasattr(self, "_clipboard_chip") and self._clipboard_chip is not None:
+                self._clipboard_chip.deleteLater()
+                self._clipboard_chip = None
+
+            chip = QPushButton(label)
+            chip.setObjectName("ActionChip")
+            chip.setStyleSheet("""
+                QPushButton#ActionChip {
+                    background-color: rgba(245, 158, 11, 0.28);
+                    border: 1px solid #F59E0B;
+                    color: #FFFFFF;
+                    font-weight: 700;
+                }
+            """)
+            chip.setToolTip(f"Copied: {preview}\nClick to execute: {action}")
+            chip.setCursor(Qt.CursorShape.PointingHandCursor)
+            chip.clicked.connect(lambda: self.send_query_signal.emit(action))
+            self._clipboard_chip = chip
+            self.chips_layout.insertWidget(0, chip)
+
+            # Update status badge
+            self.set_status(f"Clip: {preview[:12]}", "alert")
+        except Exception:
+            pass

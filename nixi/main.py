@@ -42,6 +42,12 @@ from nixi.audio.stt import SpeechTranscriber
 from nixi.audio.tts import NixiTTS, SentenceStreamer
 from nixi.audio.wake_word import WakeWordDetector
 
+# Autonomous Agent Pillars
+from nixi.agent.memory import AgentMemory
+from nixi.agent.react_planner import ReActPlanner, is_complex_agent_goal
+from nixi.agent.background_daemons import BatteryGuardianDaemon, ClipboardWatcherDaemon, DailyBriefingDaemon
+from nixi.agent.vision_copilot import VisionCopilot
+
 
 class Bridge(QObject):
     """Bridge for cross-thread communication to Qt UI thread."""
@@ -52,6 +58,8 @@ class Bridge(QObject):
     expand_island_signal = pyqtSignal()
     collapse_island_signal = pyqtSignal()
     command_signal = pyqtSignal(str)
+    clipboard_chip_signal = pyqtSignal(dict)
+    battery_warning_signal = pyqtSignal(str)
 
 
 class NixiApp:
@@ -73,9 +81,30 @@ class NixiApp:
         self.tts = NixiTTS()
         self.wake_detector = WakeWordDetector()
 
-        # UI: Dynamic Island with cute eyes and hover expansion
+        # Agent Pillars: Persistent Memory, ReAct Planner, Vision Co-Pilot
+        self.memory = AgentMemory()
+        self.react_planner = ReActPlanner(self.llm, self.memory)
+        self.vision_copilot = VisionCopilot(self.llm, self.screen_reader)
+
+        # Proactive Background Daemons
+        self.battery_daemon = BatteryGuardianDaemon(
+            on_warning=lambda msg: self.bridge.battery_warning_signal.emit(msg)
+        )
+        self.clipboard_daemon = ClipboardWatcherDaemon(
+            on_chip_detected=lambda chip: self.bridge.clipboard_chip_signal.emit(chip)
+        )
+        self.briefing_daemon = DailyBriefingDaemon(
+            on_briefing=lambda text: self._speak_briefing(text)
+        )
+
+        # UI: Dynamic Island with stylized cartoon eyes and hover expansion
         self.island = NixiDynamicIsland()
         self._wire_signals()
+
+        # Start Proactive Background Daemons
+        self.battery_daemon.start()
+        self.clipboard_daemon.start()
+        self.briefing_daemon.start()
 
         # Audio capture with speaker echo suppression
         self.audio = AudioCapture(
@@ -111,6 +140,22 @@ class NixiApp:
         self.island.dictate_toggled_signal.connect(self._toggle_dictation)
         self.island.screen_vision_signal.connect(self._handle_screen_vision)
         self.bridge.command_signal.connect(self._execute_command_text)
+
+        # Proactive Daemons to UI
+        self.bridge.clipboard_chip_signal.connect(self.island.show_clipboard_chip)
+        self.bridge.battery_warning_signal.connect(self._handle_battery_warning)
+
+    def _handle_battery_warning(self, msg: str):
+        self.bridge.status_changed.emit("Battery Low", "guardian")
+        self.bridge.chat_message_received.emit(msg, False)
+        self.tts.speak(msg)
+        self._delayed_status("Idle", "happy", 6.0)
+
+    def _speak_briefing(self, text: str):
+        self.bridge.status_changed.emit("Daily Briefing", "happy")
+        self.bridge.chat_message_received.emit(text, False)
+        self.tts.speak(text)
+        self._delayed_status("Idle", "happy", 6.0)
 
     def _start_hotkey_listener(self):
         """Register keyboard shortcuts using keyboard if available."""
@@ -198,6 +243,64 @@ class NixiApp:
 
                 # Clean conversational politeness prefixes
                 clean = re.sub(r"^(?:please\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+|hey\s+nixi\s+|nixi\s+)", "", lower).strip()
+
+                # 0. Long-term memory extraction: e.g. "remember that I prefer dark mode and Python 3.12"
+                extracted_fact = self.memory.try_extract_memory(cmd)
+                if extracted_fact:
+                    ack = "Remembered: I have saved that to my persistent memory."
+                    self.bridge.status_changed.emit("Saved to Memory", "happy")
+                    self.bridge.chat_message_received.emit(f"🧠 {ack}", False)
+                    self.tts.speak(ack)
+                    self._delayed_status("Idle", "happy", 2.5)
+                    return
+
+                # 0b. Daily Briefing request
+                if any(k in clean for k in ("morning briefing", "daily briefing", "morning brief")):
+                    brief = self.briefing_daemon.generate_briefing()
+                    self.bridge.status_changed.emit("Daily Briefing", "happy")
+                    self.bridge.chat_message_received.emit(brief, False)
+                    self.tts.speak(brief)
+                    self._delayed_status("Idle", "happy", 4.0)
+                    return
+
+                # 0c. Visual Debugging and Screen Extraction
+                if any(k in clean for k in ("debug my code", "debug screen", "explain error on screen", "find bug on screen", "visual debug", "fix my code on screen")):
+                    self.bridge.status_changed.emit("Debugging screen...", "thinking")
+                    self.tts.speak("Analyzing screen for bugs.")
+                    diag = self.vision_copilot.debug_active_screen(clean)
+                    self.bridge.chat_message_received.emit(diag, False)
+                    first_line = diag.split("\n")[0] if "\n" in diag else diag
+                    self.tts.speak(first_line)
+                    self.bridge.status_changed.emit("Debug Complete", "happy")
+                    self._delayed_status("Idle", "happy", 3.0)
+                    return
+                elif any(k in clean for k in ("extract table", "extract chart", "extract screen data", "screen to markdown", "extract infographic")):
+                    self.bridge.status_changed.emit("Extracting table...", "thinking")
+                    self.tts.speak("Extracting structured data from screen.")
+                    table_md, saved_f = self.vision_copilot.extract_screen_table_or_data(clean)
+                    res_msg = f"{table_md}\n\n📁 Saved to {saved_f}" if saved_f else table_md
+                    self.bridge.chat_message_received.emit(res_msg, False)
+                    self.tts.speak("Data extracted and saved to Desktop.")
+                    self.bridge.status_changed.emit("Extraction Done", "happy")
+                    self._delayed_status("Idle", "happy", 3.0)
+                    return
+
+                # 0d. Multi-Step Goal Decomposition & Autonomous ReAct Execution Loop
+                if is_complex_agent_goal(clean):
+                    self.bridge.status_changed.emit("Planning goal...", "thinking")
+                    self.tts.speak("Decomposing goal into steps.")
+
+                    def on_step_progress(curr, total, step_name):
+                        self.bridge.status_changed.emit(f"Step {curr}/{total}: {step_name[:18]}", "thinking")
+                        self.tts.speak(f"Executing step {curr} of {total}: {step_name}")
+
+                    summary = self.react_planner.plan_and_execute(clean, on_step_progress=on_step_progress)
+                    self.bridge.chat_message_received.emit(summary, False)
+                    first_sentence = summary.split(".")[0] + "." if "." in summary else summary
+                    self.tts.speak(first_sentence)
+                    self.bridge.status_changed.emit("Goal Complete", "happy")
+                    self._delayed_status("Idle", "happy", 3.5)
+                    return
 
                 # 1. Dictation toggle
                 if clean in ("start dictation", "dictate", "dictation on"):
@@ -332,13 +435,20 @@ class NixiApp:
         if len(self.conversation_history) > 10:
             self.conversation_history = self.conversation_history[-10:]
 
+        # Inject persistent memory facts (user profile, preferences, projects)
+        mem_prompt = self.memory.get_system_context_prompt()
+        stream_messages = []
+        if mem_prompt:
+            stream_messages.append({"role": "system", "content": mem_prompt})
+        stream_messages.extend(self.conversation_history)
+
         def worker():
             collected = []
             first_chunk = True
             # Concurrent sentence streamer feeds voice *then and there* while text streams!
             streamer = SentenceStreamer(self.tts, max_speech_sentences=50)
             try:
-                for chunk in self.llm.chat_stream(self.conversation_history):
+                for chunk in self.llm.chat_stream(stream_messages):
                     collected.append(chunk)
                     if first_chunk:
                         first_chunk = False

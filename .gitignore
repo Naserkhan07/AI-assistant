@@ -51,6 +51,9 @@ scratch/
 scratch_*/
 *.tmp
 *.log
+data/*.db
+data/*.db-wal
+data/*.db-shm
 
 # IDE & OS files
 .vscode/
