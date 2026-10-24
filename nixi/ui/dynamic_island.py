@@ -1,9 +1,9 @@
 """
 Nixi Dynamic Island — Hover-Expandable Top Widget
 Inspired by Apple Dynamic Island & HeyNixi.
-Collapsed: Ultra-compact black capsule (140x40) with cute glowing animated eyes.
-Expanded on hover: Smoothly animates into a full glassmorphic assistant (490x280)
-with text input, mic button, screen seeing button, action chips, and live responses.
+Collapsed: Ultra-compact black capsule with cute glowing animated eyes & audio visualizer wave.
+Expanded on hover: Smoothly animates into a full glassmorphic assistant (510x290)
+with text input, mic button, screen seeing button, system god-mode action chips, and live responses.
 """
 from __future__ import annotations
 
@@ -25,14 +25,71 @@ from PyQt6.QtWidgets import (
 from .blur_effect import apply_glassmorphism
 
 
+class AudioWaveWidget(QWidget):
+    """5-bar reactive audio waveform visualizer that pulses with microphone/TTS level."""
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setFixedSize(36, 20)
+        self.level = 0.0
+        self.phase = 0.0
+        self.is_active = False
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        self.timer.start(33)
+
+    def set_level(self, lvl: float):
+        self.level = max(0.0, min(1.0, lvl))
+        self.is_active = self.level > 0.04
+        self.update()
+
+    def _tick(self):
+        if self.is_active:
+            self.phase = (self.phase + 0.25) % (2 * math.pi)
+            self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setClipRect(self.rect())
+
+        w, h = self.width(), self.height()
+        bars = 5
+        bar_w = 3.0
+        spacing = (w - (bars * bar_w)) / (bars + 1)
+        cy = h / 2.0
+
+        for i in range(bars):
+            x = spacing + i * (bar_w + spacing)
+            # Modulate height by level and sine wave
+            if self.is_active:
+                wave = math.sin(self.phase + i * 0.9)
+                bar_h = max(3.0, (self.level * 14.0) + (wave * 3.0))
+            else:
+                bar_h = 3.0
+
+            y = cy - (bar_h / 2.0)
+            rect = QRect(int(x), int(y), int(bar_w), int(bar_h))
+
+            # Amber to cyan glowing gradient
+            grad = QLinearGradient(x, y, x, y + bar_h)
+            grad.setColorAt(0.0, QColor(245, 158, 11, 230))
+            grad.setColorAt(1.0, QColor(217, 119, 6, 180))
+
+            painter.setBrush(QBrush(grad))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(rect, 1.5, 1.5)
+
+
 class CuteEyesWidget(QWidget):
-    """Two cute glowing animated eyes that blink periodically like HeyNixi."""
+    """Two cute glowing animated eyes with rich multi-emotion expressions."""
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setFixedSize(56, 26)
         self.is_blinking = False
-        self.eye_state = "happy"  # "happy", "listening", "thinking"
+        self.eye_state = "happy"  # "happy", "listening", "thinking", "speaking", "surprised", "winking"
         self.phase = 0.0
+        self.audio_pulse = 0.0
 
         # Animation timer (30 FPS)
         self.anim_timer = QTimer(self)
@@ -49,9 +106,10 @@ class CuteEyesWidget(QWidget):
         self.update()
 
     def _trigger_blink(self):
-        self.is_blinking = True
-        self.update()
-        QTimer.singleShot(160, self._end_blink)
+        if self.eye_state not in ("thinking", "speaking"):
+            self.is_blinking = True
+            self.update()
+            QTimer.singleShot(160, self._end_blink)
 
     def _end_blink(self):
         self.is_blinking = False
@@ -61,34 +119,42 @@ class CuteEyesWidget(QWidget):
         self.eye_state = state
         self.update()
 
+    def set_audio_pulse(self, lvl: float):
+        self.audio_pulse = lvl
+        self.update()
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setClipRect(self.rect())
 
         w, h = self.width(), self.height()
-        cy = h / 2
+        cy = h / 2.0
 
-        # Eye color: warm amber/orange glow like the screenshot
+        # Eye color palette based on state
         if self.eye_state == "listening":
-            base_col = QColor(168, 85, 247)  # Purple
+            base_col = QColor(168, 85, 247)  # Electric Purple
         elif self.eye_state == "thinking":
-            base_col = QColor(236, 72, 153)  # Magenta
+            base_col = QColor(236, 72, 153)  # Hot Pink / Magenta
+        elif self.eye_state == "speaking":
+            base_col = QColor(56, 189, 248)  # Cyan
+        elif self.eye_state == "surprised":
+            base_col = QColor(239, 68, 68)   # Coral Red
         else:
-            base_col = QColor(245, 158, 11)   # Warm amber/orange
+            base_col = QColor(245, 158, 11)   # Warm Amber / Gold
 
         left_cx = 17.0
         right_cx = w - 17.0
 
         pulse = (math.sin(self.phase) + 1.0) * 0.5
-        eye_w = 11.0 + (pulse * 1.5)
+        eye_w = 11.0 + (pulse * 1.5) + (self.audio_pulse * 4.0)
         eye_h = 7.0 if not self.is_blinking else 1.5
 
-        for cx in (left_cx, right_cx):
-            # Outer glow
+        for i, cx in enumerate((left_cx, right_cx)):
+            # Outer Radial Glow
             glow = QRadialGradient(cx, cy, 14.0)
             c_g = QColor(base_col)
-            c_g.setAlpha(120)
+            c_g.setAlpha(130)
             glow.setColorAt(0.0, c_g)
             c_fade = QColor(base_col)
             c_fade.setAlpha(0)
@@ -97,17 +163,60 @@ class CuteEyesWidget(QWidget):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawEllipse(QRect(int(cx - 13), int(cy - 11), 26, 22))
 
-            # Cute Eye Shape: Happy arc ^
+            # Check wink state: if winking, right eye is closed
+            is_eye_winked = (self.eye_state == "winking" and i == 1)
+
             path = QPainterPath()
-            if self.is_blinking:
+            if self.is_blinking or is_eye_winked:
+                # Closed blinking eye line
                 path.moveTo(cx - 6, cy)
                 path.lineTo(cx + 6, cy)
                 pen = QPen(base_col, 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
                 painter.setPen(pen)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawPath(path)
+
+            elif self.eye_state == "speaking":
+                # Undulating playful wave eye ~
+                wave_off = math.sin(self.phase * 2.0 + i) * 2.0
+                path.moveTo(cx - 6, cy + wave_off)
+                path.cubicTo(cx - 2, cy - 4 + wave_off, cx + 2, cy + 4 + wave_off, cx + 6, cy + wave_off)
+                pen = QPen(base_col, 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+                painter.setPen(pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPath(path)
+
+            elif self.eye_state == "thinking":
+                # Focused scanning eye > <
+                dx = math.sin(self.phase * 3.0) * 2.0
+                if i == 0:
+                    path.moveTo(cx - 5 + dx, cy - 4)
+                    path.lineTo(cx + 4 + dx, cy)
+                    path.lineTo(cx - 5 + dx, cy + 4)
+                else:
+                    path.moveTo(cx + 5 + dx, cy - 4)
+                    path.lineTo(cx - 4 + dx, cy)
+                    path.lineTo(cx + 5 + dx, cy + 4)
+                pen = QPen(base_col, 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+                painter.setPen(pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPath(path)
+
+            elif self.eye_state == "surprised":
+                # Wide open circular eye O
+                painter.setPen(QPen(QColor(255, 255, 255, 220), 1.0))
+                painter.setBrush(QBrush(base_col))
+                painter.drawEllipse(QRect(int(cx - 6), int(cy - 6), 12, 12))
+
+            elif self.eye_state == "listening":
+                # Glowing alert circle •
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(base_col))
+                r_size = 5.0 + (pulse * 2.0)
+                painter.drawEllipse(QRect(int(cx - r_size), int(cy - r_size), int(r_size * 2), int(r_size * 2)))
+
             else:
-                # Triangular / curved happy eye ^
+                # Default Happy curved arc ^
                 path.moveTo(cx - 6, cy + 2)
                 path.quadTo(cx, cy - eye_h, cx + 6, cy + 2)
                 path.quadTo(cx, cy - (eye_h * 0.4), cx - 6, cy + 2)
@@ -139,54 +248,44 @@ QLabel#HeaderTitle {
 
 QLabel#StatusBadge {
     color: #F59E0B;
-    font-family: 'Segoe UI', sans-serif;
+    background-color: rgba(245, 158, 11, 0.14);
+    border: 1px solid rgba(245, 158, 11, 0.28);
+    border-radius: 9px;
+    padding: 2px 8px;
     font-size: 11px;
     font-weight: 600;
 }
 
-QScrollArea {
-    background: transparent !important;
-    border: none;
-}
-
-QScrollArea #qt_scrollarea_viewport {
-    background: transparent !important;
-    border: none;
-}
-
 QLabel#ResponseText {
     color: #F3F4F6;
-    font-family: 'Segoe UI', system-ui, sans-serif;
-    font-size: 12.5px;
-    line-height: 1.4;
+    font-family: 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+    font-size: 13px;
+    line-height: 1.45;
 }
 
-/* Quick Action Chips */
 QPushButton#ActionChip {
-    background-color: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 11px;
+    background-color: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 12px;
     color: #E5E7EB;
-    font-family: 'Segoe UI', sans-serif;
     font-size: 11px;
-    font-weight: 500;
-    padding: 5px 10px;
+    font-weight: 600;
+    padding: 4px 10px;
 }
 
 QPushButton#ActionChip:hover {
     background-color: rgba(245, 158, 11, 0.22);
-    border: 1px solid rgba(245, 158, 11, 0.5);
-    color: #FEF3C7;
+    border: 1px solid #F59E0B;
+    color: #FFFFFF;
 }
 
-/* Input Row */
 QLineEdit#InputBar {
-    background-color: rgba(255, 255, 255, 0.07);
+    background-color: rgba(255, 255, 255, 0.06);
     border: 1px solid rgba(255, 255, 255, 0.14);
-    border-radius: 13px;
+    border-radius: 14px;
     color: #FFFFFF;
-    font-family: 'Segoe UI', system-ui, sans-serif;
-    font-size: 12.5px;
+    font-family: 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+    font-size: 13px;
     padding: 8px 14px;
 }
 
@@ -261,10 +360,10 @@ class NixiDynamicIsland(QWidget):
         self.setStyleSheet(DYNAMIC_STYLE)
 
         # Sizes
-        self.collapsed_w = 144
-        self.collapsed_h = 40
-        self.expanded_w = 490
-        self.expanded_h = 280
+        self.collapsed_w = 156
+        self.collapsed_h = 42
+        self.expanded_w = 510
+        self.expanded_h = 295
 
         self.is_expanded = False
         self.is_pinned = False
@@ -298,43 +397,51 @@ class NixiDynamicIsland(QWidget):
         self.container = QWidget()
         self.container.setObjectName("IslandContainer")
         self.container_layout = QVBoxLayout(self.container)
-        self.container_layout.setContentsMargins(10, 6, 10, 8)
-        self.container_layout.setSpacing(6)
+        self.container_layout.setContentsMargins(8, 6, 8, 6)
 
-        # ── 1. Collapsed View (Cute Eyes) ────────────────────────────────────
-        self.eyes_box = QHBoxLayout()
-        self.eyes_box.setContentsMargins(0, 0, 0, 0)
-        self.eyes_box.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # ── Collapsed Widget: Cute Animated Eyes + Waveform ──────────────────
+        self.collapsed_widget = QWidget()
+        collapsed_layout = QHBoxLayout(self.collapsed_widget)
+        collapsed_layout.setContentsMargins(4, 0, 4, 0)
+        collapsed_layout.setSpacing(6)
 
-        self.eyes = CuteEyesWidget()
-        self.eyes_box.addWidget(self.eyes)
-        self.container_layout.addLayout(self.eyes_box)
+        self.eyes = CuteEyesWidget(self)
+        collapsed_layout.addWidget(self.eyes, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        # ── 2. Expanded View Elements (Initially Hidden) ─────────────────────
+        self.audio_wave = AudioWaveWidget(self)
+        collapsed_layout.addWidget(self.audio_wave, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        self.container_layout.addWidget(self.collapsed_widget)
+
+        # ── Expanded Widget: Header + Response Box + God Chips + Input Bar ──
         self.expanded_widget = QWidget()
         exp_layout = QVBoxLayout(self.expanded_widget)
-        exp_layout.setContentsMargins(4, 2, 4, 4)
+        exp_layout.setContentsMargins(4, 4, 4, 4)
         exp_layout.setSpacing(8)
 
-        # Header Row
+        # Header (Nixi Title + Cute Eyes + Status Badge + Pin + Collapse)
         header = QHBoxLayout()
         header.setSpacing(8)
 
-        self.header_title = QLabel("✦ Nixi")
-        self.header_title.setObjectName("HeaderTitle")
-        header.addWidget(self.header_title)
+        title_lbl = QLabel("Nixi ✦")
+        title_lbl.setObjectName("HeaderTitle")
+        header.addWidget(title_lbl)
 
-        self.status_badge = QLabel("Idle")
+        self.header_eyes = CuteEyesWidget(self)
+        self.header_eyes.setFixedSize(48, 22)
+        header.addWidget(self.header_eyes)
+
+        self.status_badge = QLabel("Ready")
         self.status_badge.setObjectName("StatusBadge")
         header.addWidget(self.status_badge)
 
         header.addStretch()
 
-        # Pin toggle button (keep open)
+        # Pin button
         self.pin_btn = QToolButton()
         self.pin_btn.setObjectName("HeaderIconBtn")
         self.pin_btn.setText("📌")
-        self.pin_btn.setToolTip("Pin Open (don't collapse)")
+        self.pin_btn.setToolTip("Keep Open / Unpin")
         self.pin_btn.setCheckable(True)
         self.pin_btn.toggled.connect(self._on_pin_toggled)
         header.addWidget(self.pin_btn)
@@ -352,15 +459,16 @@ class NixiDynamicIsland(QWidget):
         # Response Scroll Box
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
-        self.scroll.setFixedHeight(110)
+        self.scroll.setFixedHeight(115)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.viewport().setAutoFillBackground(False)
 
         scroll_content = QWidget()
         scroll_content.setStyleSheet("background: transparent;")
         scroll_layout = QVBoxLayout(scroll_content)
         scroll_layout.setContentsMargins(2, 2, 2, 2)
 
-        self.response_label = QLabel("I'm ready. Ask me to fill boxes, read your screen, open apps, or dictate.")
+        self.response_label = QLabel("I'm ready. Ask me anything, control system volume, search the web, fill forms, or dictate.")
         self.response_label.setObjectName("ResponseText")
         self.response_label.setWordWrap(True)
         self.response_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -370,14 +478,16 @@ class NixiDynamicIsland(QWidget):
         self.scroll.setWidget(scroll_content)
         exp_layout.addWidget(self.scroll)
 
-        # Action Chips Row
+        # God-Mode Quick Action Chips Row
         chips_layout = QHBoxLayout()
         chips_layout.setSpacing(6)
         chips = [
-            ("👁️ See Screen", "read screen"),
             ("⚡ Fill Form", "fill these boxes"),
-            ("✍️ Dictate", "toggle dictation"),
-            ("🚀 Chrome", "open chrome"),
+            ("🌐 Search Web", "search the web for "),
+            ("💻 PowerShell", "run powershell dir"),
+            ("👁️ See Screen", "read screen"),
+            ("🔇 Mute", "mute"),
+            ("🖥️ Desktop", "show desktop"),
         ]
         for label_text, cmd_text in chips:
             chip = QPushButton(label_text)
@@ -393,7 +503,7 @@ class NixiDynamicIsland(QWidget):
 
         self.input_field = QLineEdit()
         self.input_field.setObjectName("InputBar")
-        self.input_field.setPlaceholderText("Ask Nixi, e.g. 'fill these boxes'...")
+        self.input_field.setPlaceholderText("Do anything, e.g. 'search web for...', 'volume 70', 'fill form'...")
         self.input_field.returnPressed.connect(self._on_send)
         input_row.addWidget(self.input_field)
 
@@ -436,94 +546,108 @@ class NixiDynamicIsland(QWidget):
         super().enterEvent(event)
 
     def leaveEvent(self, event):
-        # Debounce collapse check
         if self.is_expanded and not self.is_pinned and not self.is_executing:
-            self.collapse_timer.start(450)
+            # 700ms debounce so user can easily mouse in and out
+            self.collapse_timer.start(700)
         super().leaveEvent(event)
 
     def _try_collapse(self):
-        # Only collapse if mouse is genuinely outside and input doesn't have focus
-        if not self.rect().contains(self.mapFromGlobal(QCursor.pos())) and not self.input_field.hasFocus():
+        # Don't collapse if cursor is still inside or if pinned/executing
+        if self.underMouse() or self.is_pinned or self.is_executing:
+            return
+        if not self.input_field.hasFocus():
             self.collapse()
 
     def expand(self):
+        """Smoothly expand Dynamic Island downwards."""
         if self.is_expanded:
             return
         self.is_expanded = True
-        self.eyes_box.parentWidget()  # ensure parent
-        self.eyes.hide()
-        self.expanded_widget.show()
 
-        # Animate geometry downwards & outwards smoothly
-        cur_geom = self.geometry()
-        center_x = cur_geom.center().x()
-        target_x = max(10, center_x - (self.expanded_w // 2))
-        target_y = cur_geom.y()
-
-        self.anim = QPropertyAnimation(self, b"geometry")
-        self.anim.setDuration(240)
-        self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self.anim.setStartValue(cur_geom)
-        self.anim.setEndValue(QRect(target_x, target_y, self.expanded_w, self.expanded_h))
-        self.anim.start()
-
-        QTimer.singleShot(150, self.input_field.setFocus)
-
-    def collapse(self):
-        if not self.is_expanded:
+        screen = QApplication.primaryScreen()
+        if not screen:
             return
-        self.is_expanded = False
-        self.expanded_widget.hide()
-        self.eyes.show()
+        geom = screen.geometry()
+        target_x = (geom.width() - self.expanded_w) // 2
+        target_y = 10
 
-        cur_geom = self.geometry()
-        center_x = cur_geom.center().x()
-        target_x = max(10, center_x - (self.collapsed_w // 2))
-        target_y = cur_geom.y()
+        self.collapsed_widget.hide()
+        self.expanded_widget.show()
 
         self.anim = QPropertyAnimation(self, b"geometry")
         self.anim.setDuration(220)
         self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self.anim.setStartValue(cur_geom)
+        self.anim.setStartValue(self.geometry())
+        self.anim.setEndValue(QRect(target_x, target_y, self.expanded_w, self.expanded_h))
+        self.anim.start()
+
+        QTimer.singleShot(240, lambda: self.input_field.setFocus())
+
+    def collapse(self):
+        """Smoothly collapse Dynamic Island back into minimal pill."""
+        if not self.is_expanded or self.is_pinned or self.is_executing:
+            return
+        self.is_expanded = False
+
+        screen = QApplication.primaryScreen()
+        if not screen:
+            return
+        geom = screen.geometry()
+        target_x = (geom.width() - self.collapsed_w) // 2
+        target_y = 10
+
+        self.expanded_widget.hide()
+        self.collapsed_widget.show()
+
+        self.anim = QPropertyAnimation(self, b"geometry")
+        self.anim.setDuration(200)
+        self.anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self.anim.setStartValue(self.geometry())
         self.anim.setEndValue(QRect(target_x, target_y, self.collapsed_w, self.collapsed_h))
         self.anim.start()
 
-    def _on_pin_toggled(self, pinned: bool):
-        self.is_pinned = pinned
-        self.pin_btn.setText("📌" if not pinned else "📍")
+    def _on_pin_toggled(self, checked: bool):
+        self.is_pinned = checked
+        self.pin_btn.setText("📌" if checked else "📍")
 
     def _on_chip_clicked(self, cmd: str):
-        self.send_query_signal.emit(cmd)
+        if cmd.endswith(" "):
+            self.input_field.setText(cmd)
+            self.input_field.setFocus()
+            self.input_field.setCursorPosition(len(cmd))
+        else:
+            self.send_query_signal.emit(cmd)
 
     def _on_send(self):
         text = self.input_field.text().strip()
         if not text:
             return
         self.input_field.clear()
-        self.set_response(f"You: {text}\n\nThinking...")
         self.send_query_signal.emit(text)
 
-    def set_response(self, text: str):
-        self.response_label.setText(text)
-        self.scroll.verticalScrollBar().setValue(0)
-
-    def set_status(self, text: str, state: str = "idle"):
-        self.status_badge.setText(text)
-        self.eyes.set_eye_state(state)
-
-    def set_audio_level(self, level: float):
-        pass  # eyes pulse automatically
-
-    # Window Dragging support
+    # ── Draggable Window via Header Mouse Press ──────────────────────────────
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
 
     def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.MouseButton.LeftButton and self._drag_pos:
+        if self._drag_pos and event.buttons() == Qt.MouseButton.LeftButton:
             self.move(event.globalPosition().toPoint() - self._drag_pos)
             event.accept()
 
     def mouseReleaseEvent(self, event):
         self._drag_pos = None
+
+    # ── External Bridge Slots ────────────────────────────────────────────────
+    def set_status(self, text: str, eye_state: str = "happy"):
+        self.status_badge.setText(text)
+        self.eyes.set_eye_state(eye_state)
+        self.header_eyes.set_eye_state(eye_state)
+
+    def set_audio_level(self, level: float):
+        self.audio_wave.set_level(level)
+        self.eyes.set_audio_pulse(level)
+
+    def set_response(self, text: str):
+        self.response_label.setText(text)

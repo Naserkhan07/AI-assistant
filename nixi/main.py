@@ -33,7 +33,7 @@ from nixi.core.dictation import DictationManager
 from nixi.core.screen_reader import ScreenReader
 from nixi.core.app_launcher import AppLauncher
 from nixi.core.timers import TimerManager
-from nixi.core.browser_agent import BrowserExecutionAgent
+from nixi.core.god_mode_agent import GodModeAgent
 from nixi.audio.audio_capture import AudioCapture
 from nixi.audio.stt import SpeechTranscriber
 from nixi.audio.tts import NixiTTS, SentenceStreamer
@@ -62,7 +62,7 @@ class NixiApp:
         self.screen_reader = ScreenReader()
         self.app_launcher = AppLauncher()
         self.timer_mgr = TimerManager()
-        self.browser_agent = BrowserExecutionAgent(self.llm)
+        self.god_agent = GodModeAgent(self.llm)
         self.stt = SpeechTranscriber()
         self.tts = NixiTTS()
         self.wake_detector = WakeWordDetector()
@@ -118,6 +118,10 @@ class NixiApp:
             self.island.set_status("Idle", "happy")
 
     def _on_speech_start(self):
+        # Instant Barge-In: Halt Nixi voice immediately when user starts speaking!
+        if self.tts.is_speaking:
+            self.tts.stop()
+
         if self.dictation.is_active:
             self.bridge.status_changed.emit("Dictating...", "listening")
         else:
@@ -149,7 +153,7 @@ class NixiApp:
             self.bridge.status_changed.emit("Idle", "happy")
 
     def _execute_command_text(self, cmd: str):
-        """Analyze user command: match built-in local actions, browser agent, or LLM."""
+        """Analyze user command: match built-in local actions, god-mode operations, or LLM."""
         if not cmd:
             self.bridge.status_changed.emit("Idle", "happy")
             return
@@ -167,23 +171,7 @@ class NixiApp:
             self.island.mic_btn.setChecked(False)
             return
 
-        # 2. Screen Vision pure description
-        if lower in ("read screen", "what is on my screen", "look at this"):
-            self._handle_screen_vision()
-            return
-
-        # 3. App Launcher: e.g. "open chrome", "launch notepad"
-        open_match = re.search(r"^(?:open|launch|start)\s+([a-zA-Z0-9\s]+)$", lower)
-        if open_match:
-            app_target = open_match.group(1).strip()
-            ok, msg = self.app_launcher.launch(app_target)
-            self.bridge.status_changed.emit(msg, "happy")
-            self.bridge.chat_message_received.emit(msg, False)
-            self.tts.speak(msg)
-            QTimer.singleShot(2500, lambda: self.bridge.status_changed.emit("Idle", "happy"))
-            return
-
-        # 4. Timer / Reminder: e.g. "set timer for 5 minutes", "timer 30 seconds"
+        # 2. Timer / Reminder: e.g. "set timer for 5 minutes", "timer 30 seconds"
         timer_match = re.search(r"(?:timer|remind me)(?:\s+for)?\s+(\d+)\s*(min|minute|sec|second|hour)s?", lower)
         if timer_match:
             val = int(timer_match.group(1))
@@ -198,12 +186,28 @@ class NixiApp:
             QTimer.singleShot(2500, lambda: self.bridge.status_changed.emit("Idle", "happy"))
             return
 
-        # 5. Screen & Browser execution (e.g. "fill these boxes", "click the button", "fill this form", "on browser do X")
-        if re.search(r"\b(fill|click|type|box|boxes|boxex|form|browser|button|enter|populate|submit|select|press)\b", lower):
-            self._handle_screen_action(cmd)
+        # 3. Dedicated App Launcher
+        open_match = re.search(r"^(?:open|launch|start)\s+([a-zA-Z0-9\s]+)$", lower)
+        if open_match and not ("http" in lower or ".com" in lower or "web" in lower or "youtube" in lower or "github" in lower):
+            app_target = open_match.group(1).strip()
+            ok, msg = self.app_launcher.launch(app_target)
+            if ok:
+                self.bridge.status_changed.emit(msg, "happy")
+                self.bridge.chat_message_received.emit(msg, False)
+                self.tts.speak(msg)
+                QTimer.singleShot(2500, lambda: self.bridge.status_changed.emit("Idle", "happy"))
+                return
+
+        # 4. God-Mode Agent (System, Media, Windows, Shell, Web Search, Screen Form Automation, Files)
+        handled, result = self.god_agent.process_command(cmd, on_voice_feedback=lambda msg: self.tts.speak(msg))
+        if handled:
+            self.bridge.status_changed.emit("Done", "happy")
+            self.bridge.chat_message_received.emit(result, False)
+            self.tts.speak(result)
+            QTimer.singleShot(2500, lambda: self.bridge.status_changed.emit("Idle", "happy"))
             return
 
-        # 6. General LLM Query
+        # 5. General LLM Query with concurrent sentence-by-sentence voice streaming
         self._ask_llm(cmd)
 
     def _on_timer_done(self, label: str):

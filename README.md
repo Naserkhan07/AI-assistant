@@ -6,9 +6,16 @@ An ultra-fast, minimal desktop AI assistant for Windows inspired by **HeyNixi** 
 
 ## ✨ Features
 
-- **🏝️ Dynamic Island UI**: Lives at the top-center of your screen as a 144×40 capsule with cute glowing eyes (`^ . ^`). Expands smoothly on hover to a 490×280 glassmorphic control drawer with text prompt input, mic tool, and action chips.
-- **⚡ Sub-Second Concurrent Voice Streaming**: Speaks text **concurrently sentence-by-sentence** while the LLM generates tokens on screen. No waiting for the full response to finish before hearing speech.
+- **🏝️ Dynamic Island UI**: Lives at the top-center of your screen as a 156×42 capsule with multi-emotion animated eyes (`happy`, `listening`, `thinking`, `speaking`, `surprised`, `winking`) and a live **5-bar reactive audio wave visualizer**. Expands smoothly on hover to a 510×295 glassmorphic control drawer with text prompt input, mic tool, and god-mode action chips.
+- **⚡ Sub-Second Concurrent Voice Streaming**: Speaks text **concurrently sentence-by-sentence** while the LLM generates tokens on screen. Instant barge-in interruption halts speech immediately when you speak.
 - **🗣️ Natural Neural TTS**: Powered by Microsoft Neural Voices (`en-US-AvaNeural`) with sub-250ms synthesis time, decoded in memory and played via `sounddevice` at 24kHz.
+- **👑 God-Mode System & OS Authority**:
+  - **Volume & Media**: Control master volume (`volume 70`, `mute`, `unmute`), media playback (`play`, `pause`, `next track`, `skip`).
+  - **Window Management**: `tile left`, `tile right`, `maximize`, `minimize all`, `show desktop`, `lock computer`.
+  - **Hardware Diagnostics**: Instant CPU, RAM, Disk, and Battery diagnostics (`system status`).
+  - **Live Web Search**: Search DuckDuckGo directly (`search web for...`, `who is...`) with instant real-time summaries.
+  - **PowerShell & Shell**: Execute arbitrary terminal commands silently (`run powershell ...`).
+  - **File Search**: Locate files across Desktop, Documents, and Downloads in milliseconds.
 - **🎯 Autonomous Browser & Screen Automation**: Observes form fields, tables (e.g. Siemens Polarion, Jira, Google Forms), buttons, and inputs, and populates or executes actions in under 0.15s.
 - **🎙️ Direct-to-App Dictation**: Transcribes your speech in real time and automatically types it into whatever window is currently focused.
 - **👁️ Screen Vision**: Captures high-speed screenshots in `<10ms` and describes on-screen content or answers questions about what you are viewing.
