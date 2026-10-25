@@ -58,6 +58,18 @@ from nixi.agent.knowledge import KnowledgeStore
 from nixi.integrations.info import Calculator
 from nixi.server import NixiServer
 from nixi.plugins import PluginManager
+from nixi.i18n.catalog import I18N
+try:
+    from nixi.security.vault import Vault
+    from nixi.automation.recorder import MacroRecorder
+    from nixi.automation.browser import BrowserController
+    from nixi.ui.notifications import NotificationCenter
+    from nixi.ui.timeline import Timeline
+    from nixi.ui.themes import palette
+    from nixi.ui.markdown_view import render_markdown
+    HAS_EXTRAS=True
+except Exception as _e:
+    HAS_EXTRAS=False
 
 
 class Bridge(QObject):
@@ -133,6 +145,15 @@ class NixiApp:
         self.api_server.journal = self.journal
         self.api_server.undo_manager = self.undo_manager
         self.api_server.plugins = self.plugins
+        if HAS_EXTRAS:
+            self.i18n = I18N(locale=self.config.tts_language if self.config.tts_language in ('en','hi','hinglish') else 'en')
+            self.vault = Vault(config=self.config)
+            self.macros = MacroRecorder(config=self.config)
+            self.browser = BrowserController(llm_client=self.llm)
+            self.notifs = NotificationCenter(config=self.config)
+            self.timeline = Timeline(config=self.config)
+        else:
+            self.i18n=self.vault=self.macros=self.browser=self.notifs=self.timeline=None
         if self.config.api_enabled:
             print(self.api_server.start())
         # System tray

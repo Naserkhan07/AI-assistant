@@ -117,3 +117,11 @@ STT_ENGINE=google
 
 ## 📄 License
 MIT License. See [LICENSE](LICENSE) for details.
+
+## v2.1 — voice i18n, theming, vault, automation
+- Voice: Hinglish/Hindi STT language param, TTS profiles (en_neutral/hi_female/hinglish), VoiceGate (open/wake/ptt/muted), partial transcript hook
+- i18n: en/hi/hinglish catalog (`nixi/i18n`)
+- Vault: encrypted form-fill (`nixi/security/vault.py`)
+- Automation: `MacroRecorder` record/replay, `BrowserController` Playwright→vision fallback, multi-monitor safe
+- UI: themes (dark/light/high-contrast), markdown+citations renderer, NotificationCenter, Timeline
+- Packaging: `packaging/build.ps1` + docs/ARCHITECTURE.md

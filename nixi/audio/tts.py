@@ -28,11 +28,18 @@ except ImportError:
     HAS_EDGE_TTS = False
 
 
+VOICE_PROFILES = {
+    "en_neutral": ("en-US-AvaNeural","+10%","+0Hz"),
+    "en_warm": ("en-US-JennyNeural","+0%","+2Hz"),
+    "hi_female": ("hi-IN-SwaraNeural","+5%","+0Hz"),
+    "hinglish": ("en-IN-NeerjaNeural","+5%","+0Hz"),
+}
 class NixiTTS:
     def __init__(self, voice: str = "en-US-AvaNeural", rate: str = "+10%", pitch: str = "+0Hz"):
         self.voice = voice
         self.rate = rate
         self.pitch = pitch
+        self._profile = "en_neutral"
         
         # Two-stage pipelined queues
         self.text_queue: queue.Queue[Optional[str]] = queue.Queue()
@@ -76,6 +83,11 @@ class NixiTTS:
         text = re.sub(r"\s+", " ", text).strip()
         return text
 
+    def set_profile(self, profile: str) -> None:
+        if profile in VOICE_PROFILES:
+            self._profile=profile
+            self.voice, self.rate, self.pitch = VOICE_PROFILES[profile]
+    def list_profiles(self) -> list[str]: return list(VOICE_PROFILES.keys())
     def enqueue_sentence(self, text: str):
         """Enqueue text chunk to be synthesized and pre-buffered immediately."""
         clean = self.clean_text(text)

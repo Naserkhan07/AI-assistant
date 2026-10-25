@@ -44,7 +44,7 @@ class SpeechTranscriber:
             except Exception:
                 pass
 
-    def transcribe_audio_samples(self, audio_data: np.ndarray, sample_rate: int = 16000) -> str:
+    def transcribe_audio_samples(self, audio_data: np.ndarray, sample_rate: int = 16000, language: str | None = None, on_partial=None) -> str:
         """Transcribe a numpy float32/int16 array of audio samples."""
         if len(audio_data) == 0:
             return ""
@@ -58,7 +58,7 @@ class SpeechTranscriber:
                 else:
                     audio_float = audio_data
 
-                segments, _ = self.whisper_model.transcribe(audio_float, beam_size=1)
+                segments, _ = self.whisper_model.transcribe(audio_float, beam_size=1, language=language) if language else self.whisper_model.transcribe(audio_float, beam_size=1)
                 text = " ".join([s.text for s in segments]).strip()
                 if text:
                     return text
