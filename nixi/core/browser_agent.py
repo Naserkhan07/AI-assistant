@@ -9,8 +9,11 @@ import time
 import json
 import base64
 import re
-import pyautogui
-import pyperclip
+from nixi.compat.optional import load
+from nixi.compat import fakes
+
+pyautogui = load("pyautogui", fakes.FakePyAutoGUI())
+pyperclip = load("pyperclip", fakes.FakePyperclip())
 from typing import List, Dict, Any, Optional, Tuple
 
 class BrowserExecutionAgent:

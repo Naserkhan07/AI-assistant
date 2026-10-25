@@ -1,14 +1,15 @@
-"""
-Nixi Dictation Engine
-Types transcribed text directly into whichever desktop application currently has keyboard focus.
-Uses fast clipboard injection (Ctrl+V) with fallback to keyboard typing to support full Unicode & emojis.
-"""
+"""Dictation engine — clipboard injection with safe fallbacks."""
 from __future__ import annotations
 
 import time
 import threading
-import pyautogui
-import pyperclip
+
+from nixi.compat.optional import load
+from nixi.compat import fakes
+
+pyautogui = load("pyautogui", fakes.FakePyAutoGUI())
+pyperclip = load("pyperclip", fakes.FakePyperclip())
+
 
 class DictationManager:
     def __init__(self):
@@ -20,43 +21,30 @@ class DictationManager:
             self.is_active = not self.is_active
             return self.is_active
 
-    def set_active(self, active: bool):
+    def set_active(self, active: bool) -> None:
         with self._lock:
             self.is_active = active
 
-    def inject_text(self, text: str, trailing_space: bool = True):
-        """Injects text into active window via clipboard Ctrl+V."""
-        if not text:
+    def inject_text(self, text: str, trailing_space: bool = True) -> None:
+        if not text or not text.strip():
             return
-
-        cleaned_text = text.strip()
-        if not cleaned_text:
-            return
-
-        if trailing_space:
-            cleaned_text += " "
-
-        # Save previous clipboard content
+        cleaned = text.strip() + (" " if trailing_space else "")
         old_clip = ""
         try:
             old_clip = pyperclip.paste()
         except Exception:
             pass
-
         try:
-            # Put text in clipboard and simulate Ctrl+V
-            pyperclip.copy(cleaned_text)
+            pyperclip.copy(cleaned)
             time.sleep(0.04)
-            pyautogui.hotkey('ctrl', 'v')
+            pyautogui.hotkey("ctrl", "v")
             time.sleep(0.05)
-        except Exception as e:
-            # Fallback to direct typing
+        except Exception:
             try:
-                pyautogui.write(cleaned_text, interval=0.01)
+                pyautogui.write(cleaned, interval=0.01)
             except Exception:
                 pass
         finally:
-            # Restore clipboard after small delay
             time.sleep(0.1)
             if old_clip:
                 try:

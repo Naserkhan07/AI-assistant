@@ -85,7 +85,7 @@ if (Test-Path "repos\freellmapi") {
     }
 
     # Seed keyless zero-cost providers
-    if (Test-Path "repos\freellmapi\add-keyless-providers.mjs") {
+    if (Test-Path "scripts\add-keyless-providers.mjs") {
         Push-Location "repos\freellmapi"
         node add-keyless-providers.mjs 2>$null | Out-Null
         Pop-Location

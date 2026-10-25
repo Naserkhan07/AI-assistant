@@ -48,6 +48,16 @@ from nixi.agent.memory import AgentMemory
 from nixi.agent.react_planner import ReActPlanner, is_complex_agent_goal
 from nixi.agent.background_daemons import BatteryGuardianDaemon, ClipboardWatcherDaemon, DailyBriefingDaemon
 from nixi.agent.vision_copilot import VisionCopilot
+from nixi.config import NixiConfig, get_config
+from nixi.logging_utils import setup_logging, get_logger, Diagnostics
+from nixi.security import PermissionManager, UndoManager, ActionJournal, RiskLevel
+from nixi.privacy import VisionGuard
+from nixi.platform.system import system_stats as platform_stats
+from nixi.platform.capabilities import IS_WINDOWS
+from nixi.agent.knowledge import KnowledgeStore
+from nixi.integrations.info import Calculator
+from nixi.server import NixiServer
+from nixi.plugins import PluginManager
 
 
 class Bridge(QObject):
@@ -65,14 +75,21 @@ class Bridge(QObject):
 
 class NixiApp:
     def __init__(self):
+        self.config = get_config()
+        setup_logging(self.config)
+        self.log = get_logger("app")
+        for w in self.config.validate():
+            print(f"[Nixi Config] {w}")
         self.app = QApplication(sys.argv)
         self.app.setApplicationName("Nixi")
         self.app.setQuitOnLastWindowClosed(False)
+        self.app.aboutToQuit.connect(self._on_quit)
 
         self.bridge = Bridge()
 
-        # Core engines
-        self.llm = NixiLLMClient()
+        # Core engines (config-aware)
+        self.llm = NixiLLMClient(config=self.config)
+
         self.dictation = DictationManager()
         self.screen_reader = ScreenReader()
         self.app_launcher = AppLauncher()
@@ -86,6 +103,41 @@ class NixiApp:
         self.memory = AgentMemory()
         self.react_planner = ReActPlanner(self.llm, self.memory)
         self.vision_copilot = VisionCopilot(self.llm, self.screen_reader)
+        # Fix: browser_agent was referenced but never constructed
+        try:
+            from nixi.core.browser_agent import BrowserAgent
+            self.browser_agent = BrowserAgent(self.llm, self.screen_reader)
+        except Exception as exc:
+            self.browser_agent = None
+            print(f"[Nixi] BrowserAgent unavailable: {exc}")
+        # Privacy & security
+        self.vision_guard = VisionGuard(config=self.config, indicator=self._vision_indicator)
+        self.journal = ActionJournal(enabled=self.config.audit_enabled)
+        self.undo_manager = UndoManager(config=self.config, journal=self.journal)
+        self.permissions = PermissionManager(config=self.config, confirm_callback=self._confirm_action, journal=self.journal)
+        self.llm._permission_manager = self.permissions
+        # Knowledge, calculator, plugins, API
+        self.knowledge = KnowledgeStore(config=self.config)
+        self.calculator = Calculator()
+        self.plugins = PluginManager(config=self.config)
+        try:
+            self.plugins.discover()
+        except Exception:
+            pass
+        self.api_server = NixiServer(config=self.config)
+        self.api_server.llm = self.llm
+        self.api_server.chat_handler = self._api_chat
+        self.api_server.command_handler = self._api_command
+        self.api_server.history_provider = lambda n: self.memory.get_history(limit=n)
+        self.api_server.tools_provider = self._api_tools
+        self.api_server.journal = self.journal
+        self.api_server.undo_manager = self.undo_manager
+        self.api_server.plugins = self.plugins
+        if self.config.api_enabled:
+            print(self.api_server.start())
+        # System tray
+        self._tray = None
+        self._setup_tray()
 
         # Proactive Background Daemons
         self.battery_daemon = BatteryGuardianDaemon(
@@ -167,6 +219,10 @@ class NixiApp:
                 keyboard.add_hotkey('F8', lambda: self.island.mic_btn.toggle())
                 keyboard.add_hotkey('F9', lambda: self.island.collapse() if self.island.is_expanded else self.island.expand())
                 keyboard.add_hotkey('F10', self._handle_screen_vision)
+                try:
+                    keyboard.add_hotkey(self.config.hotkey_palette, self._open_palette)
+                except Exception:
+                    pass
             except Exception:
                 pass
         t = threading.Thread(target=listen, daemon=True)
@@ -313,7 +369,7 @@ class NixiApp:
                         self.bridge.status_changed.emit(f"Step {curr}/{total}: {step_name[:18]}", "thinking")
                         self.tts.speak(f"Executing step {curr} of {total}: {step_name}")
 
-                    summary = self.react_planner.plan_and_execute(clean, on_step_progress=on_step_progress)
+                    ok, summary = self.react_planner.plan_and_execute(clean, on_step_progress=on_step_progress)
                     self.bridge.chat_message_received.emit(summary, False)
                     first_sentence = summary.split(".")[0] + "." if "." in summary else summary
                     self.tts.speak(first_sentence)
@@ -403,6 +459,8 @@ class NixiApp:
                 # Minimal wait for window redraw
                 time.sleep(0.06)
                 img_bytes = self.screen_reader.capture_screen()
+                if not self.browser_agent:
+                    raise RuntimeError("Browser automation is unavailable on this platform.")
                 summary = self.browser_agent.execute_screen_goal(goal, img_bytes)
                 
                 # Expand island and display confirmation immediately
@@ -463,7 +521,11 @@ class NixiApp:
         self.tts.stop()
 
         # Check if live screen vision should be included (Always-On mode OR visual intent)
-        include_screen = getattr(self.island, "is_screen_always_on", True) or self._is_visual_query(query)
+        # Privacy: vision is opt-in via Settings; respect VisionGuard
+        guard_ok = self.vision_guard.check(explicit=self._is_visual_query(query))
+        include_screen = bool(guard_ok) or self._is_visual_query(query)
+        if not guard_ok and not self._is_visual_query(query):
+            print(f"[Privacy] Vision blocked: {guard_ok.reason}")
         img_bytes = None
         if include_screen:
             try:
@@ -481,6 +543,10 @@ class NixiApp:
             user_turn_content = query
 
         self.conversation_history.append({"role": "user", "content": query})
+        try:
+            self.memory.add_message("user", query)
+        except Exception:
+            pass
         if len(self.conversation_history) > 10:
             self.conversation_history = self.conversation_history[-10:]
 
@@ -521,6 +587,10 @@ class NixiApp:
                     full_reply = "I didn't receive a response from the model."
 
                 self.conversation_history.append({"role": "assistant", "content": full_reply})
+                try:
+                    self.memory.add_message("assistant", full_reply)
+                except Exception:
+                    pass
                 self.bridge.status_changed.emit("Idle", "happy")
 
             except Exception as e:
@@ -535,6 +605,109 @@ class NixiApp:
                 self._delayed_status("Idle", "happy", 2.5)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    # ── New helpers ─────────────────────────────────────────────────
+    def _vision_indicator(self, active: bool, title: str) -> None:
+        try:
+            if active:
+                self.bridge.status_changed.emit("Screen capture", "thinking")
+            self.island.set_vision_active(active)
+        except Exception:
+            pass
+
+    def _confirm_action(self, action: str, risk, args) -> bool:
+        # In GUI mode show a blocking dialog; in headless always deny high-risk
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+            box = QMessageBox(self.island)
+            box.setWindowTitle("Confirm action")
+            box.setText(f"Allow '{action}'?\nRisk: {risk.name} — {args}")
+            box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            return box.exec() == QMessageBox.StandardButton.Yes
+        except Exception:
+            return False
+
+    def _api_chat(self, message: str) -> str:
+        try:
+            return self.llm.chat([{"role": "user", "content": message}])
+        except Exception as exc:
+            return f"Error: {exc}"
+
+    def _api_command(self, tool: str, args: dict) -> str:
+        # Route through GodModeAgent for now
+        handled, result = self.god_agent.process_command(f"{tool} {args}")
+        return result if handled else f"Unknown tool: {tool}"
+
+    def _api_tools(self) -> list:
+        return [{"name": n, "description": s.get("description","")} for n, s in getattr(self.god_agent, 'tools', {}).items()] or ["system", "web", "files"]
+
+    def _setup_tray(self) -> None:
+        try:
+            from PyQt6.QtWidgets import QSystemTrayIcon, QMenu
+            from PyQt6.QtGui import QIcon, QAction
+            if not QSystemTrayIcon.isSystemTrayAvailable():
+                return
+            self._tray = QSystemTrayIcon(self.island)
+            menu = QMenu()
+            show_act = QAction("Show Nixi", menu)
+            show_act.triggered.connect(self.island.show)
+            menu.addAction(show_act)
+            expand_act = QAction("Expand", menu)
+            expand_act.triggered.connect(self.island.expand)
+            menu.addAction(expand_act)
+            quit_act = QAction("Quit Nixi", menu)
+            quit_act.triggered.connect(self._quit_app)
+            menu.addAction(quit_act)
+            self._tray.setContextMenu(menu)
+            self._tray.show()
+        except Exception:
+            pass
+
+    def _quit_app(self) -> None:
+        try:
+            self.audio.stop()
+        except Exception:
+            pass
+        for d in (getattr(self, 'battery_daemon', None), getattr(self, 'clipboard_daemon', None), getattr(self, 'briefing_daemon', None)):
+            try:
+                if d: d.stop()
+            except Exception:
+                pass
+        try:
+            if getattr(self, 'api_server', None): self.api_server.stop()
+        except Exception:
+            pass
+        self.app.quit()
+
+    def _on_quit(self) -> None:
+        self._quit_app()
+
+    def _open_palette(self) -> None:
+        try:
+            from nixi.ui.palette import CommandPalette
+            actions = [
+                {"label": "Open Settings", "description": "Configure provider, voice, privacy", "action": "settings"},
+                {"label": "Toggle Vision", "description": "Enable/disable screen vision", "action": "vision"},
+                {"label": "Show Diagnostics", "description": "Health checks and capabilities", "action": "doctor"},
+                {"label": "Knowledge: Search", "description": "Search your indexed documents", "action": "knowledge"},
+                {"label": "Undo Last Action", "description": "Revert last file operation", "action": "undo"},
+            ]
+            def on_pick(a):
+                if a.get("action") == "settings": self._open_settings()
+                elif a.get("action") == "vision": self.vision_guard.set_enabled(not self.config.vision_enabled)
+                elif a.get("action") == "undo": self.undo_manager.undo_last()
+            pal = CommandPalette(actions=actions, on_selected=on_pick, parent=self.island)
+            pal.exec()
+        except Exception as exc:
+            print(f"[Palette] {exc}")
+
+    def _open_settings(self) -> None:
+        try:
+            from nixi.ui.settings_dialog import SettingsDialog
+            dlg = SettingsDialog(config=self.config, llm=self.llm, parent=self.island)
+            dlg.exec()
+        except Exception as exc:
+            print(f"[Settings] {exc}")
 
     def run(self):
         self.island.show()

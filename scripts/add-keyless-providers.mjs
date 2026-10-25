@@ -1,5 +1,5 @@
-import { initDb } from '../repos/freellmapi/server/dist/db/index.js';
-import { initEncryptionKey, encrypt } from '../repos/freellmapi/server/dist/lib/crypto.js';
+import { initDb } from './repos/freellmapi/server/dist/db/index.js';
+import { initEncryptionKey, encrypt } from './repos/freellmapi/server/dist/lib/crypto.js';
 
 const db = initDb();
 initEncryptionKey(db);

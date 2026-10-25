@@ -622,7 +622,7 @@ class NixiDynamicIsland(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.is_screen_always_on = True
+        self.is_screen_always_on = False
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
@@ -640,6 +640,7 @@ class NixiDynamicIsland(QWidget):
         self.is_expanded = False
         self.is_pinned = False
         self.is_executing = False
+        self._vision_active = False
         self._drag_pos = None
 
         # Debounce timer for collapsing on mouse leave
@@ -856,6 +857,14 @@ class NixiDynamicIsland(QWidget):
         self.anim.start()
 
         QTimer.singleShot(240, lambda: self.input_field.setFocus())
+
+    def set_vision_active(self, active: bool) -> None:
+        self._vision_active = active
+        try:
+            if hasattr(self, 'vision_dot'):
+                self.vision_dot.setVisible(active)
+        except Exception:
+            pass
 
     def collapse(self):
         """Smoothly collapse Dynamic Island back into minimal pill."""

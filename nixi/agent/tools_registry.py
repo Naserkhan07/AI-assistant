@@ -24,11 +24,14 @@ import urllib.parse
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
-import psutil
-import pyautogui
-import pyperclip
-
 from nixi.core.system_ops import SystemOps
+from nixi.compat.optional import load
+from nixi.compat import fakes
+from nixi.platform.capabilities import has_module, IS_WINDOWS
+
+psutil = load("psutil", fakes.FakePsutil())
+pyautogui = load("pyautogui", fakes.FakePyAutoGUI())
+pyperclip = load("pyperclip", fakes.FakePyperclip())
 
 
 class AgentToolsRegistry:
@@ -133,11 +136,18 @@ class AgentToolsRegistry:
 
         # Launch in Notepad
         try:
-            os.startfile(str(target_file))
-            return f"Saved note to {target_file.name} and opened in Notepad."
+            if IS_WINDOWS:
+                os.startfile(str(target_file))  # type: ignore[attr-defined]
+            else:
+                from nixi.platform.system import open_path
+                open_path(target_file)
+            return f"Saved note to {target_file.name} and opened it."
         except Exception:
-            subprocess.Popen(["notepad.exe", str(target_file)])
-            return f"Saved note to {target_file.name} and launched Notepad."
+            try:
+                subprocess.Popen(["notepad.exe", str(target_file)])
+            except Exception:
+                pass
+            return f"Saved note to {target_file.name}."
 
     # --------------------------------------------------------------------------
     # 3. DEEP SYSTEM HEALTH & GUARDIAN
@@ -269,7 +279,7 @@ class AgentToolsRegistry:
         Conducts deep multi-source research across 5+ web sources,
         cleans article markdown with Jina Reader, and aggregates insights.
         """
-        api_key = os.getenv("EXA_API_KEY", "16eb355e-7c10-4429-be29-2653a896a43f")
+        api_key = os.getenv("EXA_API_KEY", "")
         sources = []
         try:
             from exa_py import Exa

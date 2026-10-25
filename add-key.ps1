@@ -29,7 +29,7 @@ if ($choice -match "^[Yy]") {
     Write-Host "  2. Go to 'Providers' or 'Keys'" -ForegroundColor White
     Write-Host "  3. Add any free API key (e.g. Groq from https://console.groq.com/keys" -ForegroundColor White
     Write-Host "     or Gemini from https://aistudio.google.com/apikey)" -ForegroundColor White
-    Write-Host "  4. Once added, launch Jarvis using: .\start.ps1" -ForegroundColor Green
+    Write-Host "  4. Once added, launch Nixi using: .\start.ps1" -ForegroundColor Green
 } else {
     Write-Host "You can open http://localhost:3001 anytime to configure provider keys." -ForegroundColor Yellow
 }

@@ -13,10 +13,13 @@ import re
 import json
 import time
 import os
-import pyautogui
-pyautogui.FAILSAFE = False
-pyautogui.PAUSE = 0.02
-import pyperclip
+from nixi.compat.optional import load
+from nixi.compat import fakes
+pyautogui = load("pyautogui", fakes.FakePyAutoGUI())
+pyperclip = load("pyperclip", fakes.FakePyperclip())
+try:
+    pyautogui.FAILSAFE = False; pyautogui.PAUSE = 0.02
+except Exception: pass
 from typing import Dict, Any, List, Optional, Tuple, Callable
 
 from .system_ops import SystemOps

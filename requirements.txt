@@ -1,24 +1,35 @@
-# Nixi AI Desktop Assistant - Core Dependencies
-PyQt6>=6.6.0,<7.0.0
-sounddevice>=0.4.6,<1.0.0
-soundfile>=0.12.0
-edge-tts>=7.0.0
-numpy>=1.24.0,<3.0.0
-httpx>=0.27.0,<1.0.0
-pyautogui>=0.9.54
-pyperclip>=1.8.2
-pillow>=10.0.0,<13.0.0
-mss>=9.0.0,<11.0.0
-python-dotenv>=1.0.0
+# Nixi — unified requirements (GUI + headless)
+# Core (required everywhere)
+httpx>=0.27
+python-dotenv>=1.0
+psutil>=5.9
 
-# Speech Recognition & Audio Tools
-SpeechRecognition>=3.10.0
-faster-whisper>=1.0.0
-keyboard>=0.13.5
-pypiwin32>=223; sys_platform == 'win32'
-pywin32>=306; sys_platform == 'win32'
+# Desktop GUI (Windows primary, optional elsewhere)
+PyQt6>=6.4; sys_platform == "win32"
+pillow>=10.0; sys_platform == "win32"
+mss>=9.0; sys_platform == "win32"
 
-# Exa Neural Search & Agent Reach
-exa-py>=2.0.0
-yt-dlp>=2026.01.01
-feedparser>=6.0.0
+# Audio (optional — graceful fallback to silent)
+sounddevice>=0.4; sys_platform == "win32"
+soundfile>=0.12; sys_platform == "win32"
+faster-whisper>=1.0; sys_platform == "win32"
+SpeechRecognition>=3.10; sys_platform == "win32"
+edge-tts>=6.1; sys_platform == "win32"
+pyttsx3>=2.9; sys_platform == "win32"
+
+# Automation helpers (optional)
+pyautogui>=0.9; sys_platform == "win32"
+pyperclip>=1.8
+pycaw>=20220416; sys_platform == "win32"
+keyboard>=0.13; sys_platform == "win32"
+
+# Web & intelligence (optional, used when available)
+exa-py>=0.8
+ddgs>=8.0
+yt-dlp>=2024.0
+feedparser>=6.0
+markdown>=3.5
+
+# Dev
+pytest>=8.0
+pytest-cov>=5.0
