@@ -118,6 +118,12 @@ STT_ENGINE=google
 ## 📄 License
 MIT License. See [LICENSE](LICENSE) for details.
 
+## Responsive system actions
+- Voice transcription runs off the audio callback; the Whisper model warms in the background so startup stays responsive.
+- Commands get an immediate visual acknowledgement, duplicate recognitions are debounced, and long-running work shows a live "still working" status instead of appearing frozen.
+- Model requests use shorter bounded timeouts and a single fast primary attempt; a stalled stream preserves partial output and reports the stall.
+- Shell commands honor the confirmation policy and display a UI-thread confirmation prompt before execution.
+
 ## v2.1 — voice i18n, theming, vault, automation
 - Voice: Hinglish/Hindi STT language param, TTS profiles (en_neutral/hi_female/hinglish), VoiceGate (open/wake/ptt/muted), partial transcript hook
 - i18n: en/hi/hinglish catalog (`nixi/i18n`)

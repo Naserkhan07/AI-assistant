@@ -75,10 +75,20 @@ class NixiLLMClient:
         try:
             import httpx
             self._httpx = httpx
-            self._client = httpx.Client(timeout=httpx.Timeout(connect=4.0, read=12.0, write=5.0, pool=5.0))
+            # fast timeouts + connection pooling + warm connection
+            self._client = httpx.Client(
+                timeout=httpx.Timeout(connect=2.0, read=8.0, write=4.0, pool=3.0),
+                limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+                http2=False,
+            )
+            # in-memory response cache for identical prompts (5 min TTL)
+            self._cache: dict[str, tuple[float, str]] = {}
+            self._cache_ttl = 300.0
         except ImportError:
             self._httpx = None  # type: ignore
             self._client = None  # type: ignore
+            self._cache = {}  # type: ignore
+            self._cache_ttl = 300.0  # type: ignore
 
     def _providers(self) -> list[ProviderSpec]:
         specs = self.config.provider_specs()
@@ -122,39 +132,76 @@ class NixiLLMClient:
                 out.append(m)
         return out or ["auto"]
 
-    def chat_stream(self, messages: list[dict[str, Any]], temperature: float | None = None) -> Generator[str, None, None]:
+    def _cache_key(self, messages: list[dict[str, Any]], temp: float, max_tokens: int) -> str:
+        import hashlib, json as _json
+        try:
+            raw = _json.dumps(messages, sort_keys=True, default=str) + f"|{temp}|{max_tokens}"
+            return hashlib.md5(raw.encode()).hexdigest()
+        except Exception:
+            return ""
+
+    def chat_stream(self, messages: list[dict[str, Any]], temperature: float | None = None, use_cache: bool = True) -> Generator[str, None, None]:
+        import time as _time
         temp = temperature if temperature is not None else self.config.temperature
         vision = _has_image(messages)
         full = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
-        max_tokens = self.config.vision_max_tokens if vision else self.config.max_tokens
+        # Favor short first responses for voice; users can ask to continue for detail.
+        max_tokens = min(self.config.vision_max_tokens, 500) if vision else min(self.config.max_tokens, 600)
 
-        # offline path
+        # offline path — instant
         if self.config.local_only or not self._client:
             yield self.offline.reply(messages)
             return
 
-        providers = [p for p in self._providers() if not p.is_offline]
+        # check cache for non-vision (vision images change every call)
+        ckey = self._cache_key(full, temp, max_tokens) if (use_cache and not vision) else ""
+        if ckey and ckey in self._cache:
+            ts, cached = self._cache[ckey]
+            if _time.time() - ts < self._cache_ttl:
+                # stream cached in one go but yield word-by-word for streamer compat
+                for w in cached.split(" "):
+                    yield w + " "
+                return
+
+        providers = [p for p in self._providers() if not p.is_offline][:1]
         if not providers:
             yield self.offline.reply(messages)
             return
 
+        # One primary streaming attempt avoids serially waiting on many stale endpoints.
+        # If it fails, use a single short rescue attempt below.
         has_streamed = False
+        collected: list[str] = []
+        start_ts = _time.time()
+        # limit total time budget to 9s — after that force offline fallback
+        time_budget = 9.0
+
         for spec in providers:
-            for model_name in self._candidate_models(vision):
+            if _time.time() - start_ts > time_budget:
+                break
+            for model_name in self._candidate_models(vision)[:1]:
+                if _time.time() - start_ts > time_budget:
+                    break
                 url = f"{spec.base_url}/chat/completions"
                 headers = {"Content-Type": "application/json"}
                 if spec.api_key:
                     headers["Authorization"] = f"Bearer {spec.api_key}"
                 payload = {"model": model_name, "messages": full, "temperature": temp, "max_tokens": max_tokens, "stream": True}
                 try:
+                    # tight timeout for streaming attempt
                     with self._client.stream("POST", url, headers=headers, json=payload,
-                                             timeout=self._httpx.Timeout(connect=4.0, read=12.0, write=5.0, pool=5.0)) as resp:
+                                             timeout=self._httpx.Timeout(connect=1.5, read=4.0, write=2.5, pool=2.0)) as resp:
                         if resp.status_code != 200:
                             log.debug("model %s -> %s, trying next", model_name, resp.status_code)
                             continue
                         stream_failed = False
                         in_think = False
+                        first_byte_deadline = _time.time() + 3.0  # must get first token quickly
+                        got_first = False
                         for line in resp.iter_lines():
+                            if not got_first and _time.time() > first_byte_deadline:
+                                stream_failed = True
+                                break
                             line = line.strip()
                             if not line or not line.startswith("data: "):
                                 continue
@@ -179,40 +226,59 @@ class NixiLLMClient:
                                     else:
                                         continue
                                 if content:
+                                    if not got_first:
+                                        got_first = True
                                     has_streamed = True
+                                    collected.append(content)
                                     yield content
                             except Exception:
                                 continue
                         if has_streamed and not stream_failed:
+                            if ckey:
+                                self._cache[ckey] = (_time.time(), "".join(collected))
                             return
                         if stream_failed:
                             continue
                 except Exception as exc:
-                    if isinstance(exc, self._httpx.ConnectError):  # type: ignore
-                        yield "Connection error — is the LLM gateway running? Check Settings > Provider."
+                    # instant offline-style message instead of hanging
+                    if self._httpx and isinstance(exc, self._httpx.ConnectError):  # type: ignore
+                        yield "Gateway offline — I can still do local system tasks instantly. Say 'open chrome' or 'set timer 5 minutes'."
                         return
                     log.debug("stream error %s: %s", model_name, exc)
                     continue
 
+        if has_streamed:
+            # Preserve partial output and make a stalled stream explicit instead of appearing frozen.
+            yield "\n\n(Response paused because the model connection stalled.)"
+            return
+
         if not has_streamed:
-            # one non-streaming rescue
-            for spec in providers:
-                for m in ["mistral-nemo", "free-router", "kilo-auto"]:
+            # one non-streaming rescue with 2s timeout only
+            for spec in providers[:1]:  # only primary provider for speed
+                for m in ["mistral-nemo"]:
+                    if _time.time() - start_ts > time_budget:
+                        break
                     try:
                         url = f"{spec.base_url}/chat/completions"
                         headers = {"Content-Type": "application/json"}
                         if spec.api_key:
                             headers["Authorization"] = f"Bearer {spec.api_key}"
                         r = self._client.post(url, headers=headers,
-                                              json={"model": m, "messages": full, "temperature": temp, "max_tokens": 120, "stream": False}, timeout=5.0)
+                                              json={"model": m, "messages": full, "temperature": temp, "max_tokens": 120, "stream": False}, timeout=2.0)
                         if r.status_code == 200:
                             content = r.json().get("choices", [{}])[0].get("message", {}).get("content", "")
                             if content:
+                                if ckey:
+                                    self._cache[ckey] = (_time.time(), content)
                                 yield content
                                 return
                     except Exception:
                         pass
-            yield "All model endpoints are busy. I can still help with local tasks, file search, and knowledge base."
+            # final instant fallback — never hang
+            if ckey and ckey in self._cache:
+                yield self._cache[ckey][1]
+            else:
+                yield "All cloud models are busy — try a local command like volume up, open notepad, or tell me what you want me to do on your PC."
 
     def chat(self, messages: list[dict[str, Any]], temperature: float | None = None) -> str:
         return "".join(self.chat_stream(messages, temperature=temperature))
@@ -295,7 +361,7 @@ class NixiLLMClient:
                     if spec.api_key:
                         headers["Authorization"] = f"Bearer {spec.api_key}"
                     resp = self._client.post(url, headers=headers,
-                                             json={"model": model_name, "messages": messages, "temperature": 0.2, "max_tokens": mt}, timeout=20.0)
+                                             json={"model": model_name, "messages": messages, "temperature": 0.2, "max_tokens": mt}, timeout=6.0)
                     if resp.status_code == 200:
                         content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
                         if content:

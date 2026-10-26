@@ -97,17 +97,18 @@ class NixiTTS:
         self.text_queue.put(clean)
 
     def speak(self, text: str, interrupt_previous: bool = True):
-        """Speak a complete string immediately with minimal latency."""
+        """Speak immediately — non-blocking, never hang."""
+        if not text or not text.strip():
+            return
         if interrupt_previous:
             self.stop()
-        
-        # Split into clauses/sentences for rapid pipelined playback
+        text = text.strip()[:600]
         parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+|(?<=[,;])\s+", text) if p.strip()]
         if not parts:
             parts = [text]
-            
-        for p in parts:
-            self.enqueue_sentence(p)
+        for p in parts[:6]:
+            if len(p) > 2:
+                self.enqueue_sentence(p)
 
     def stop(self):
         """Instantly stop ongoing audio playback and purge all pending queues."""
@@ -166,19 +167,15 @@ class NixiTTS:
                 print(f"[Nixi TTS] Synthesis error: {e}")
 
     def _synthesize_audio(self, text: str, loop: asyncio.AbstractEventLoop) -> Optional[Tuple[np.ndarray, int]]:
-        """Fetch neural audio via edge-tts with fast fallback."""
+        """Fetch neural audio via edge-tts with fast fallback — never hang."""
         if not text.strip():
             return None
 
-        if HAS_EDGE_TTS:
+        # try edge-tts only for short texts and with tight timeout
+        if HAS_EDGE_TTS and len(text) < 500:
             try:
                 async def _fetch():
-                    communicate = edge_tts.Communicate(
-                        text=text,
-                        voice=self.voice,
-                        rate=self.rate,
-                        pitch=self.pitch
-                    )
+                    communicate = edge_tts.Communicate(text=text, voice=self.voice, rate=self.rate, pitch=self.pitch)
                     chunks: List[bytes] = []
                     async for chunk in communicate.stream():
                         if self.interrupted.is_set():
@@ -186,20 +183,31 @@ class NixiTTS:
                         if chunk["type"] == "audio":
                             chunks.append(chunk["data"])
                     return b"".join(chunks)
-
-                audio_bytes = loop.run_until_complete(asyncio.wait_for(_fetch(), timeout=8.0))
-                if not audio_bytes or self.interrupted.is_set():
-                    return None
-
-                # Decode audio bytes in memory directly to float32 numpy array
-                audio_data, sample_rate = sf.read(io.BytesIO(audio_bytes))
-                return audio_data, sample_rate
-
-            except Exception as e:
+                # 3.5s timeout — if not fast, go local instantly
+                audio_bytes = loop.run_until_complete(asyncio.wait_for(_fetch(), timeout=3.5))
+                if audio_bytes and not self.interrupted.is_set():
+                    try:
+                        audio_data, sample_rate = sf.read(io.BytesIO(audio_bytes))
+                        return audio_data, sample_rate
+                    except Exception:
+                        pass
+            except Exception:
                 pass
 
-        # Local fallback via SAPI wav if edge-tts timed out
-        return self._local_sapi_audio(text)
+        # Local fallback via SAPI wav — instant, offline
+        local = self._local_sapi_audio(text)
+        if local:
+            return local
+        # last resort: pyttsx3 synchronous speak (fire and forget)
+        try:
+            import pyttsx3
+            engine = pyttsx3.init()
+            engine.setProperty('rate', 180)
+            engine.say(text)
+            engine.runAndWait()
+        except Exception:
+            pass
+        return None
 
     def _local_sapi_audio(self, text: str) -> Optional[Tuple[np.ndarray, int]]:
         """Generate audio in RAM using Windows SAPI for zero-latency fallback."""

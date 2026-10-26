@@ -83,6 +83,7 @@ class Bridge(QObject):
     command_signal = pyqtSignal(str)
     clipboard_chip_signal = pyqtSignal(dict)
     battery_warning_signal = pyqtSignal(str)
+    confirm_action_signal = pyqtSignal(object)
 
 
 class NixiApp:
@@ -90,6 +91,9 @@ class NixiApp:
         self.config = get_config()
         setup_logging(self.config)
         self.log = get_logger("app")
+        self._status_generation = 0
+        self._last_cmd_text = ""
+        self._last_cmd_ts = 0.0
         for w in self.config.validate():
             print(f"[Nixi Config] {w}")
         self.app = QApplication(sys.argv)
@@ -107,7 +111,10 @@ class NixiApp:
         self.app_launcher = AppLauncher()
         self.timer_mgr = TimerManager()
         self.god_agent = GodModeAgent(self.llm)
-        self.stt = SpeechTranscriber()
+        whisper_size = self.config.whisper_model
+        if self.config.stt_language.lower().startswith(("hi", "hinglish")) and whisper_size.endswith(".en"):
+            whisper_size = whisper_size[:-3]
+        self.stt = SpeechTranscriber(model_size=whisper_size, preload=True)
         self.tts = NixiTTS()
         self.wake_detector = WakeWordDetector()
 
@@ -128,6 +135,7 @@ class NixiApp:
         self.undo_manager = UndoManager(config=self.config, journal=self.journal)
         self.permissions = PermissionManager(config=self.config, confirm_callback=self._confirm_action, journal=self.journal)
         self.llm._permission_manager = self.permissions
+        self.god_agent.permissions = self.permissions
         # Knowledge, calculator, plugins, API
         self.knowledge = KnowledgeStore(config=self.config)
         self.calculator = Calculator()
@@ -182,6 +190,9 @@ class NixiApp:
 
         # Audio capture with speaker echo suppression
         self.audio = AudioCapture(
+            sample_rate=self.config.sample_rate,
+            silence_duration_sec=self.config.silence_duration_sec,
+            energy_threshold=self.config.energy_threshold,
             on_speech_detected=self._on_speech_start,
             on_speech_finished=self._on_speech_done,
             on_audio_level=lambda lvl: self.bridge.audio_level_changed.emit(lvl),
@@ -195,11 +206,17 @@ class NixiApp:
         self._start_hotkey_listener()
 
     def _delayed_status(self, text: str = "Idle", mood: str = "happy", delay: float = 2.5):
-        """Thread-safe delayed status reset without QTimer cross-thread warnings."""
+        """Reset status only if no newer command has started in the meantime."""
+        generation = getattr(self, "_status_generation", 0)
         def run():
             time.sleep(delay)
-            self.bridge.status_changed.emit(text, mood)
+            if generation == getattr(self, "_status_generation", 0):
+                self.bridge.status_changed.emit(text, mood)
         threading.Thread(target=run, daemon=True).start()
+
+    def _instant_ack(self, cmd: str):
+        # Visual acknowledgement is instant; don't start network TTS before the operation.
+        self.bridge.status_changed.emit(f"Starting: {cmd[:28]}", "thinking")
 
     def _wire_signals(self):
         # Bridge to UI
@@ -219,6 +236,7 @@ class NixiApp:
         # Proactive Daemons to UI
         self.bridge.clipboard_chip_signal.connect(self.island.show_clipboard_chip)
         self.bridge.battery_warning_signal.connect(self._handle_battery_warning)
+        self.bridge.confirm_action_signal.connect(self._show_confirmation_dialog)
 
     def _handle_battery_warning(self, msg: str):
         self.bridge.status_changed.emit("Battery Low", "guardian")
@@ -269,53 +287,54 @@ class NixiApp:
             self.bridge.status_changed.emit("Listening...", "listening")
 
     def _on_speech_done(self, audio_data):
-        """Transcribe and route audio speech."""
-        text = self.stt.transcribe_audio_samples(audio_data)
-        if not text:
-            if not self.dictation.is_active and not self.tts.is_speaking:
-                self.bridge.status_changed.emit("Idle", "happy")
-            return
-
-        print(f"[Nixi Voice] Heard: '{text}'")
-
-        # Acoustic Echo & Self-Interruption Guard:
-        # If assistant is currently speaking or synthesizing, only allow explicit stop commands
-        if self.tts.is_speaking:
-            interrupt_words = {"stop", "quiet", "shut up", "cancel", "pause", "halt"}
-            lower_txt = text.lower().strip()
-            if any(w in lower_txt for w in interrupt_words):
-                self.tts.stop()
-                self.bridge.status_changed.emit("Stopped", "happy")
-                self._delayed_status("Idle", "happy", 1.5)
-            # Discard any noise/echo transcribed while Nixi is speaking
-            return
-
-        # Case 1: Dictation mode is active -> inject directly into focused app!
-        if self.dictation.is_active:
-            if "stop dictation" in text.lower():
-                self.island.mic_btn.setChecked(False)
+        """Transcribe and route audio speech — ultra fast, non-blocking."""
+        self.bridge.status_changed.emit("Heard \u2014 transcribing...", "thinking")
+        def _do_transcribe():
+            started = time.monotonic()
+            lang = getattr(self.config, "stt_language", "") or None
+            text = self.stt.transcribe_audio_samples(audio_data, language=lang)
+            elapsed = time.monotonic() - started
+            print(f"[Perf] speech recognition completed in {elapsed:.2f}s")
+            if not text:
+                if not self.dictation.is_active and not self.tts.is_speaking:
+                    self.bridge.status_changed.emit("Didn't catch that — try again", "listening")
+                    self._delayed_status("Idle", "happy", 2.0)
                 return
-            self.dictation.inject_text(text)
-            self.bridge.status_changed.emit(f"Typed: {text[:14]}", "listening")
-            return
-
-        # Case 2: Standard assistant speech routing
-        wake_enabled = os.getenv("WAKE_WORD_ENABLED", "false").lower() == "true"
-        is_wake, command = self.wake_detector.check(text)
-
-        # Allow command if: wake word is disabled, or wake word was spoken, or island is expanded
-        should_process = (not wake_enabled) or is_wake or self.island.is_expanded
-
-        if should_process:
-            actual_cmd = (command if is_wake and command else text).strip()
-            print(f"[Nixi Voice] Executing command: '{actual_cmd}'")
-            self.bridge.status_changed.emit("Thinking...", "thinking")
-            # Show the user's voice message in the chat display so they see it was heard
-            self.bridge.chat_message_received.emit(f"🗣️ {actual_cmd}", True)
-            self.bridge.command_signal.emit(actual_cmd)
-        else:
-            print(f"[Nixi Voice] Ignored (wake word required): '{text}'")
-            self.bridge.status_changed.emit("Idle", "happy")
+            print(f"[Nixi Voice] Heard: '{text}'")
+            if self.tts.is_speaking:
+                interrupt_words = {"stop", "quiet", "shut up", "cancel", "pause", "halt"}
+                lower_txt = text.lower().strip()
+                if any(w in lower_txt for w in interrupt_words):
+                    self.tts.stop()
+                    self.bridge.status_changed.emit("Stopped", "happy")
+                    self._delayed_status("Idle", "happy", 1.0)
+                return
+            if self.dictation.is_active:
+                if "stop dictation" in text.lower():
+                    try:
+                        self.island.mic_btn.setChecked(False)
+                    except Exception:
+                        pass
+                    return
+                self.dictation.inject_text(text)
+                self.bridge.status_changed.emit(f"Typed: {text[:16]}", "listening")
+                return
+            wake_enabled = os.getenv("WAKE_WORD_ENABLED", "false").lower() == "true"
+            if getattr(self.config, "wake_word_enabled", False):
+                wake_enabled = True
+            is_wake, command = self.wake_detector.check(text)
+            should_process = (not wake_enabled) or is_wake or getattr(self.island, "is_expanded", False)
+            if should_process:
+                actual_cmd = (command if is_wake and command else text).strip()
+                print(f"[Nixi Voice] Executing command: '{actual_cmd}'")
+                self.bridge.chat_message_received.emit(f"\U0001f5e3 {actual_cmd}", True)
+                self._instant_ack(actual_cmd)
+                self.bridge.command_signal.emit(actual_cmd)
+            else:
+                print(f"[Nixi Voice] Ignored (wake word required): '{text}'")
+                self.bridge.status_changed.emit("Idle", "happy")
+        import threading as _thr
+        _thr.Thread(target=_do_transcribe, daemon=True).start()
 
     def _execute_command_text(self, cmd: str):
         """Analyze user command asynchronously without freezing the UI thread."""
@@ -324,10 +343,19 @@ class NixiApp:
             return
 
         cmd = cmd.strip()
+        now = time.monotonic()
+        # Speech recognizers may emit the same completed utterance twice; ignore duplicates.
+        if cmd.casefold() == getattr(self, "_last_cmd_text", "").casefold() and now - getattr(self, "_last_cmd_ts", 0.0) < 1.5:
+            return
+        self._last_cmd_text, self._last_cmd_ts = cmd, now
+        self._status_generation = getattr(self, "_status_generation", 0) + 1
+        command_generation = self._status_generation
+        command_done = threading.Event()
+        asynchronous = [False]
+        self.bridge.status_changed.emit(f"Working: {cmd[:28]}", "thinking")
 
         def runner():
             try:
-                self.tts.stop()
                 lower = cmd.lower().strip()
 
                 # Clean conversational politeness prefixes
@@ -447,14 +475,23 @@ class NixiApp:
                     return
 
                 # 5. General LLM Query with concurrent sentence-by-sentence voice streaming
-                self._ask_llm(cmd)
+                asynchronous[0] = True
+                self._ask_llm(cmd, finished_event=command_done)
             except Exception as e:
                 err_text = f"Notice: {e}"
                 self.bridge.chat_message_received.emit(err_text, False)
                 self.tts.speak(err_text)
                 self._delayed_status("Idle", "happy", 2.5)
+                command_done.set()
+            finally:
+                if not asynchronous[0]:
+                    command_done.set()
 
-        threading.Thread(target=runner, daemon=True).start()
+        threading.Thread(target=runner, name="nixi-command", daemon=True).start()
+        def command_watchdog():
+            if not command_done.wait(8.0) and command_generation == getattr(self, "_status_generation", 0):
+                self.bridge.status_changed.emit(f"Still working: {cmd[:24]}", "thinking")
+        threading.Thread(target=command_watchdog, name="nixi-command-watchdog", daemon=True).start()
 
     def _on_timer_done(self, label: str):
         msg = f"⏰ Time is up! ({label})"
@@ -537,8 +574,11 @@ class NixiApp:
         )
         return any(trig in lower for trig in triggers)
 
-    def _ask_llm(self, query: str):
-        """Stream message from FreeLLMAPI in real time with concurrent sentence-by-sentence voice output and live screen vision."""
+    def _ask_llm(self, query: str, finished_event: threading.Event | None = None):
+        """Stream model response with live progress and a bounded wait/fallback."""
+        request_generation = getattr(self, "_status_generation", 0)
+        response_started = threading.Event()
+        self.bridge.status_changed.emit("Connecting...", "thinking")
         self.tts.stop()
 
         # Check if live screen vision should be included (Always-On mode OR visual intent)
@@ -594,6 +634,7 @@ class NixiApp:
                     collected.append(chunk)
                     if first_chunk:
                         first_chunk = False
+                        response_started.set()
                         self.bridge.status_changed.emit("Answering...", "thinking")
                     # Real-time token streaming into the UI!
                     self.bridge.chat_message_received.emit("".join(collected), False)
@@ -623,9 +664,16 @@ class NixiApp:
                 self.bridge.chat_message_received.emit(fallback_msg, False)
                 self.tts.speak(fallback_msg)
             finally:
+                response_started.set()
+                if finished_event is not None:
+                    finished_event.set()
                 self._delayed_status("Idle", "happy", 2.5)
 
-        threading.Thread(target=worker, daemon=True).start()
+        def progress_watchdog():
+            if not response_started.wait(5.0) and request_generation == getattr(self, "_status_generation", 0):
+                self.bridge.status_changed.emit("Still waiting for the model...", "thinking")
+        threading.Thread(target=progress_watchdog, name="nixi-response-watchdog", daemon=True).start()
+        threading.Thread(target=worker, name="nixi-llm", daemon=True).start()
 
     # ── New helpers ─────────────────────────────────────────────────
     def _vision_indicator(self, active: bool, title: str) -> None:
@@ -637,16 +685,31 @@ class NixiApp:
             pass
 
     def _confirm_action(self, action: str, risk, args) -> bool:
-        # In GUI mode show a blocking dialog; in headless always deny high-risk
+        """Ask on the Qt/UI thread; never create modal Qt widgets from workers."""
+        event = threading.Event()
+        request = {"action": action, "risk": risk, "args": args, "event": event, "approved": False}
         try:
-            from PyQt6.QtWidgets import QMessageBox
-            box = QMessageBox(self.island)
-            box.setWindowTitle("Confirm action")
-            box.setText(f"Allow '{action}'?\nRisk: {risk.name} — {args}")
-            box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            return box.exec() == QMessageBox.StandardButton.Yes
+            self.bridge.confirm_action_signal.emit(request)
+            return bool(event.wait(timeout=60.0) and request["approved"])
         except Exception:
             return False
+
+    def _show_confirmation_dialog(self, request: dict) -> None:
+        """Runs on Qt thread and unblocks the requesting worker after user decision."""
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+            risk = request.get("risk")
+            risk_name = getattr(risk, "name", str(risk))
+            box = QMessageBox(self.island)
+            box.setWindowTitle("Confirm system action")
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setText(f"Allow '{request.get('action')}'?\nRisk: {risk_name}\nDetails: {request.get('args')}")
+            box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            request["approved"] = box.exec() == QMessageBox.StandardButton.Yes
+        except Exception:
+            request["approved"] = False
+        finally:
+            request["event"].set()
 
     def _api_chat(self, message: str) -> str:
         try:

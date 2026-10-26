@@ -205,8 +205,15 @@ class GodModeAgent:
         sh_match = re.search(r"^(?:run\s+powershell|powershell|cmd|terminal|exec|execute\s+command)\s+(.+)$", raw, re.IGNORECASE)
         if sh_match:
             sh_cmd = sh_match.group(1).strip()
+            # Shell is powerful: require the configured confirmation policy before execution.
+            permissions = getattr(self, "permissions", None)
+            if permissions is not None:
+                from nixi.security.permissions import RiskLevel
+                decision = permissions.authorize("run_shell", RiskLevel.HIGH, {"command": sh_cmd})
+                if not decision.allowed:
+                    return True, f"Not run: {decision.reason}. You can allow shell commands in Settings if you choose."
             if on_voice_feedback:
-                on_voice_feedback("Running command.")
+                on_voice_feedback("Running the approved command.")
             out = self.system.run_powershell(sh_cmd)
             return True, f"Output:\n{out[:400]}"
 
