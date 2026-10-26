@@ -43,10 +43,9 @@ class AgentToolsRegistry:
     # 1. FILE & FOLDER ORGANIZATION (Downloads, Desktop, Custom)
     # --------------------------------------------------------------------------
     @staticmethod
-    def organize_folder(target_folder: Optional[str] = None, delete_old_installers: bool = True, days_old: int = 30) -> str:
-        """
-        Organizes files into category subfolders and deletes obsolete installers.
-        """
+    def organize_folder(target_folder: Optional[str] = None, delete_old_installers: bool = False,
+                        days_old: int = 30, undo_manager=None) -> str:
+        """Organize files into category folders; deletion is opt-in and moves are undoable."""
         if not target_folder:
             target_folder = str(Path.home() / "Downloads")
 
@@ -85,7 +84,10 @@ class AgentToolsRegistry:
                 try:
                     mtime = datetime.fromtimestamp(item.stat().st_mtime)
                     if mtime < cutoff_date:
-                        item.unlink()
+                        if undo_manager is not None:
+                            undo_manager.safe_delete(item)
+                        else:
+                            return "Refusing to delete installers without an undo manager."
                         deleted_installers += 1
                         continue
                 except Exception:
@@ -101,8 +103,13 @@ class AgentToolsRegistry:
                     dest_file = dest_dir / f"{item.stem}_{int(time.time())}{item.suffix}"
 
                 try:
-                    shutil.move(str(item), str(dest_file))
-                    moved_counts[cat] += 1
+                    if undo_manager is not None:
+                        result = undo_manager.safe_move(item, dest_file)
+                        if result.startswith("Moved "):
+                            moved_counts[cat] += 1
+                    else:
+                        shutil.move(str(item), str(dest_file))
+                        moved_counts[cat] += 1
                 except Exception as e:
                     print(f"[File Organizer] Error moving {item.name}: {e}")
 
@@ -260,15 +267,25 @@ class AgentToolsRegistry:
         if not output_path:
             output_path = str(src.with_suffix(".mp3"))
 
-        cmd = f'powershell -Command "ffmpeg -i \'{src}\' -q:a 0 -map a \'{output_path}\' -y"'
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            return f"FFmpeg is not installed; no shell was launched. Cannot extract audio from '{src.name}'."
         try:
-            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
+            kwargs = {"capture_output": True, "text": True, "timeout": 60}
+            if IS_WINDOWS:
+                kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            subprocess.run(
+                [ffmpeg, "-i", str(src), "-q:a", "0", "-map", "a", str(output_path), "-y"],
+                check=True, **kwargs,
+            )
             if Path(output_path).exists() and Path(output_path).stat().st_size > 0:
                 return f"Successfully extracted audio to: {Path(output_path).name}"
-        except Exception:
-            pass
+        except subprocess.TimeoutExpired:
+            return "Audio extraction timed out after 60 seconds."
+        except Exception as exc:
+            return f"Audio extraction failed: {exc}"
 
-        return f"FFmpeg was required to extract audio from '{src.name}'. Ensure ffmpeg is installed."
+        return f"Audio extraction failed for '{src.name}'."
 
     # --------------------------------------------------------------------------
     # 5. DEEP MULTI-SOURCE WEB RESEARCH (Agent-Reach + Exa)

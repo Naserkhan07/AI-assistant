@@ -1,26 +1,25 @@
 # Nixi AI Desktop Assistant ✦
 
-An ultra-fast, minimal desktop AI assistant for Windows inspired by **HeyNixi** and Apple's **Dynamic Island**. Features an always-on-top, hover-expandable glassmorphism capsule with animated glowing eyes, real-time sentence-by-sentence streaming neural voice, live screen vision, instant focused-window dictation, and autonomous browser/form automation.
+A Windows-first desktop AI assistant inspired by **HeyNixi** and Apple's **Dynamic Island**. Nixi combines voice/chat, a compact PyQt UI, allow-listed native Windows actions, bounded file skills, task progress/cancellation, and optional integrations with a controlled browser, Office document files, and VS Code. Supported system actions do not invoke a shell.
 
 ---
 
 ## ✨ Features
 
 - **🏝️ Dynamic Island UI**: Lives at the top-center of your screen as a 156×42 capsule with multi-emotion animated eyes (`happy`, `listening`, `thinking`, `speaking`, `surprised`, `winking`) and a live **5-bar reactive audio wave visualizer**. Expands smoothly on hover to a 510×295 glassmorphic control drawer with text prompt input, mic tool, and god-mode action chips.
-- **⚡ Sub-Second Concurrent Voice Streaming**: Speaks text **concurrently sentence-by-sentence** while the LLM generates tokens on screen. Instant barge-in interruption halts speech immediately when you speak.
-- **🗣️ Natural Neural TTS**: Powered by Microsoft Neural Voices (`en-US-AvaNeural`) with sub-250ms synthesis time, decoded in memory and played via `sounddevice` at 24kHz.
-- **👑 God-Mode System & OS Authority**:
+- **⚡ Streaming voice responses**: Displays assistant text in one updating chat turn while sentence-based speech plays. Push-to-talk supports interruption while Nixi is speaking; recognition/model latency still depends on the configured device and provider.
+- **🗣️ Voice input/output**: Uses the configured speech recognizer and TTS provider. Hindi/Hinglish-friendly multilingual recognition, push-to-talk, barge-in, and spoken cancellation are supported where the configured audio devices and providers are available.
+- **👑 Bounded Native Controls**:
   - **Volume & Media**: Control master volume (`volume 70`, `mute`, `unmute`), media playback (`play`, `pause`, `next track`, `skip`).
   - **Window Management**: `tile left`, `tile right`, `maximize`, `minimize all`, `show desktop`, `lock computer`.
   - **Hardware Diagnostics**: Instant CPU, RAM, Disk, and Battery diagnostics (`system status`).
-  - **🔍 Exa Neural Search**: Semantic web search powered by Exa AI (`search web for...`, `exa search...`) with live highlights and content extraction.
-  - **👁️ Agent Reach Internet Access**: Read clean markdown from any URL via Jina Reader (`read page <url>`), extract YouTube video info and subtitles (`summarize video <url>`), and check reachability (`agent reach doctor`).
-  - **PowerShell & Shell**: Execute arbitrary terminal commands silently (`run powershell ...`).
-  - **File Search**: Locate files across Desktop, Documents, and Downloads in milliseconds.
-- **🎯 Autonomous Browser & Screen Automation**: Observes form fields, tables (e.g. Siemens Polarion, Jira, Google Forms), buttons, and inputs, and populates or executes actions in under 0.15s.
+  - **Web tools**: Search and page-reading features depend on configured providers and available network access; Nixi reports when a provider is unavailable.
+  - **Native Windows actions**: Change volume/media state, open allow-listed Settings pages and apps, manage common windows, and inspect system status without invoking PowerShell, CMD, or another shell.
+  - **Bounded file skills**: Find files and create/move/rename/trash files under the home folder; overwrites are refused, trash/moves are undoable, and destructive actions require confirmation.
+- **🎯 Bounded app integrations**: Playwright can target visible browser controls by name and verify filled values. Screen-coordinate interactions require confirmation; if visual targeting is uncertain, Nixi does nothing rather than inventing data. Office skills create/read Word and Excel files, and VS Code skills open files/projects; unsupported arbitrary automation is not promised.
 - **🎙️ Direct-to-App Dictation**: Transcribes your speech in real time and automatically types it into whatever window is currently focused.
-- **👁️ Screen Vision**: Captures high-speed screenshots in `<10ms` and describes on-screen content or answers questions about what you are viewing.
-- **🧠 Zero-Cost Intelligence**: Powered by **FreeLLMAPI** (`http://localhost:3001`), supporting 30+ free providers with zero subscription fees.
+- **👁️ Screen Vision**: Can analyze the visible screen for an explicit visual request when the configured vision provider and screen-capture dependencies are available.
+- **🧠 Configurable model providers**: Uses Nixi's configured provider/model settings; network availability, rate limits, and provider costs vary.
 - **⌨️ Global Windows Hotkeys**:
   - `F8`: Toggle instant dictation on/off.
   - `F9`: Expand/collapse the Dynamic Island drawer.
@@ -72,7 +71,7 @@ Run the automated setup script in PowerShell:
 ```powershell
 .\setup.ps1
 ```
-This script creates a virtual environment, installs Python dependencies, configures `.env`, and sets up FreeLLMAPI.
+This script creates a virtual environment, installs Python dependencies, configures `.env`, and runs capability diagnostics. To also download the separate Chromium runtime for controlled DOM-based browser actions, use `.\setup.ps1 -InstallBrowser` (the download is optional and sizable).
 
 ### 3. Launching Nixi
 Start the assistant anytime with:
@@ -122,13 +121,13 @@ MIT License. See [LICENSE](LICENSE) for details.
 - Voice transcription runs off the audio callback; the Whisper model warms in the background so startup stays responsive.
 - Commands get an immediate visual acknowledgement, duplicate recognitions are debounced, and long-running work shows a live "still working" status instead of appearing frozen.
 - Model requests use shorter bounded timeouts and a single fast primary attempt; a stalled stream preserves partial output and reports the stall.
-- Windows commands use the Windows-supplied PowerShell runtime as a hidden, captured child process (no console window); shell-launch shortcuts are blocked. Shell commands honor the confirmation policy and display a UI-thread confirmation prompt before execution.
-- For clear natural-language action requests, Nixi can select from built-in app, system-status, file-search, volume/media, window, note, and folder-organization skills; destructive/high-impact skills require confirmation. This is capability-bounded rather than unrestricted arbitrary control.
+- Arbitrary PowerShell/CMD/shell execution is disabled; Nixi uses Python and native Windows APIs/libraries for supported actions, and shell-launch shortcuts are blocked.
+- For clear natural-language action requests, Nixi can select built-in app, system-status, file-search/create/move/rename/trash, settings, volume/media, window, note, and folder-organization skills. High-impact changes require confirmation, and supported file actions are undoable. This is capability-bounded rather than unrestricted arbitrary control.
 
 ## v2.1 — voice i18n, theming, vault, automation
 - Voice: Hinglish/Hindi STT language param, TTS profiles (en_neutral/hi_female/hinglish), VoiceGate (open/wake/ptt/muted), partial transcript hook
 - i18n: en/hi/hinglish catalog (`nixi/i18n`)
 - Vault: encrypted form-fill (`nixi/security/vault.py`)
-- Automation: `MacroRecorder` record/replay, `BrowserController` Playwright→vision fallback, multi-monitor safe
+- Integrations: bounded Playwright DOM actions (when Chromium is installed), Word/Excel document skills via Python libraries, and shell-free VS Code project opening. Screen-coordinate actions require confirmation and never guess data when visual targeting fails.
 - UI: themes (dark/light/high-contrast), markdown+citations renderer, NotificationCenter, Timeline
 - Packaging: `packaging/build.ps1` + docs/ARCHITECTURE.md

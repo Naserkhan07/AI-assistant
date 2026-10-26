@@ -54,39 +54,13 @@ def disk_root() -> str:
 
 
 def run_shell(command: str, timeout: int = 15) -> str:
-    """Run a shell command with a hard timeout. Windows uses PowerShell."""
+    """Compatibility stub: arbitrary shell execution is intentionally disabled."""
     if not command or not command.strip():
         return "Error: empty command."
-    try:
-        if IS_WINDOWS:
-            # PowerShell is a hidden, captured child process: never create a console window.
-            # This uses the Windows PowerShell runtime already supplied with Windows.
-            executable = os.path.join(
-                os.environ.get("SystemRoot", r"C:\Windows"),
-                "System32", "WindowsPowerShell", "v1.0", "powershell.exe",
-            )
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = 0
-            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-            proc = subprocess.run(
-                [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
-                capture_output=True, text=True, timeout=timeout, check=False,
-                creationflags=flags, startupinfo=startupinfo,
-            )
-        else:
-            proc = subprocess.run(
-                ["/bin/sh", "-c", command],
-                capture_output=True, text=True, timeout=timeout, check=False,
-            )
-        out, err = (proc.stdout or "").strip(), (proc.stderr or "").strip()
-        if err and not out:
-            return f"Error: {err}"
-        return out or "Command executed successfully with no output."
-    except subprocess.TimeoutExpired:
-        return f"Command timed out after {timeout} seconds."
-    except Exception as exc:
-        return f"Execution error: {exc}"
+    return (
+        "Arbitrary shell execution is disabled. Ask Nixi for a supported built-in action "
+        "such as opening an app, changing volume, finding a file, or managing a window."
+    )
 
 
 def active_window_title() -> str:

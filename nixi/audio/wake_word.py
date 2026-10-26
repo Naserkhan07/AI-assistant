@@ -7,7 +7,10 @@ from __future__ import annotations
 import re
 from typing import Tuple
 
-DEFAULT_TRIGGERS = ["hey nixi", "nixi", "hey nixie", "nixie", "hey jarvis", "jarvis"]
+DEFAULT_TRIGGERS = [
+    "hey nixi", "nixi", "hey nixie", "nixie", "hey jarvis", "jarvis",
+    "hey nixi", "निक्सी", "हे निक्सी", "ऐ निक्सी", "निक्सी जी",
+]
 
 class VoiceGate:
     """Gating for voice input: open / wake / push_to_talk / muted."""

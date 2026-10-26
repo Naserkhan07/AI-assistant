@@ -5,7 +5,7 @@ import base64
 import json
 import re
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any, Callable, Generator
 
 from nixi.config import NixiConfig, ProviderSpec, get_config
 from nixi.logging_utils import get_logger
@@ -284,7 +284,8 @@ class NixiLLMClient:
         return "".join(self.chat_stream(messages, temperature=temperature))
 
     def tool_loop(self, messages: list[dict[str, Any]], tools: dict[str, Any],
-                  max_iters: int = 6, temperature: float | None = None) -> str:
+                  max_iters: int = 6, temperature: float | None = None,
+                  on_tool_start: Callable[[str, dict[str, Any]], None] | None = None) -> str:
         """
         Structured tool-calling loop.
         ``tools`` maps tool name -> {"description": str, "function": callable, "risk": RiskLevel|int}
@@ -315,6 +316,11 @@ class NixiLLMClient:
                 convo.append({"role": "assistant", "content": reply})
                 convo.append({"role": "user", "content": f"Unknown tool '{tool_name}'. Use one of: {', '.join(tools.keys())} or return {{\"final\": \"...\"}}."})
                 continue
+            if on_tool_start:
+                try:
+                    on_tool_start(str(tool_name), args if isinstance(args, dict) else {})
+                except Exception:
+                    pass
             # permission check
             risk = tools[tool_name].get("risk", RiskLevel.SAFE)
             if pm:

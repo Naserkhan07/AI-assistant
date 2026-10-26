@@ -8,6 +8,8 @@ import os
 import subprocess
 import shutil
 
+from nixi.platform.capabilities import IS_WINDOWS
+
 APP_MAP = {
     "notepad": "notepad.exe",
     "calc": "calc.exe",
@@ -18,10 +20,6 @@ APP_MAP = {
     "microsoft edge": "msedge",
     "firefox": "firefox",
     "brave": "brave",
-    "terminal": "wt.exe",
-    "cmd": "cmd.exe",
-    "command prompt": "cmd.exe",
-    "powershell": "powershell.exe",
     "vscode": "code",
     "vs code": "code",
     "visual studio code": "code",
@@ -48,7 +46,7 @@ class AppLauncher:
         # The user's preference is to execute commands inside Nixi, never launch a shell UI.
         shell_names = ("powershell", "pwsh", "cmd", "command prompt", "terminal")
         if any(term in name for term in shell_names):
-            return False, "Shell windows are disabled; Nixi can run approved system commands in the background."
+            return False, "Shell windows and shell commands are disabled. Ask for a supported built-in action instead."
         # Direct lookup
         target = APP_MAP.get(name)
 
@@ -63,17 +61,35 @@ class AppLauncher:
             target = name
 
         try:
-            if target.startswith("start "):
-                os.system(target)
-                return True, f"Opening {name}"
-            
-            # Try startfile (Windows standard URI / registered apps)
+            if target == "start ms-settings:":
+                if not IS_WINDOWS:
+                    return False, "Windows Settings is only available on Windows."
+                os.startfile("ms-settings:")  # type: ignore[attr-defined]
+                return True, "Windows accepted the Settings launch request."
+
+            if target == "code":
+                from nixi.integrations.vscode import VSCodeIntegration
+                executable = VSCodeIntegration._code_executable()
+                if not executable:
+                    return False, "VS Code's executable was not found."
+                kwargs = {"close_fds": True}
+                if IS_WINDOWS:
+                    kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                subprocess.Popen([executable], **kwargs)
+                return True, "Sent an app-launch request to VS Code."
+
+            # Use the OS association first; never invoke a command shell.
             try:
-                os.startfile(target)
+                os.startfile(target)  # type: ignore[attr-defined]
                 return True, f"Opening {name}"
-            except Exception:
-                # Fallback to subprocess
-                subprocess.Popen(target, shell=True)
+            except (AttributeError, OSError):
+                executable = shutil.which(target)
+                if not executable:
+                    return False, f"Could not find an installed app named '{name}'."
+                kwargs = {"close_fds": True}
+                if IS_WINDOWS:
+                    kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                subprocess.Popen([executable], **kwargs)
                 return True, f"Opening {name}"
         except Exception as e:
             return False, f"Could not launch '{name}': {str(e)}"

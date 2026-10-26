@@ -245,6 +245,9 @@ class UndoManager:
     def record_delete(self, original: str | Path, trash_path: str | Path) -> int:
         return self.journal.add_undo("delete", {"src": str(original), "trash": str(trash_path)})
 
+    def record_create(self, path: str | Path) -> int:
+        return self.journal.add_undo("create", {"path": str(path)})
+
     def undo_last(self) -> str:
         entries = self.journal.pending_undo()
         if not entries:
@@ -262,6 +265,12 @@ class UndoManager:
                 if trash.exists():
                     src.parent.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(trash), str(src))
+            elif entry["op"] == "create":
+                path = Path(payload["path"])
+                if path.is_file():
+                    path.unlink()
+                elif path.exists():
+                    return "Undo refused: created path is no longer a regular file."
             else:
                 return f"Unknown undo operation: {entry['op']}"
             self.journal.mark_undone(int(entry["id"]))

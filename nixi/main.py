@@ -21,6 +21,7 @@ import re
 import threading
 import time
 import base64
+from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtWidgets import QApplication
@@ -38,10 +39,15 @@ from nixi.core.screen_reader import ScreenReader
 from nixi.core.app_launcher import AppLauncher
 from nixi.core.timers import TimerManager
 from nixi.core.god_mode_agent import GodModeAgent
+from nixi.core.file_actions import FileActionService
+from nixi.core.task_center import TaskCenter
+from nixi.integrations.office import OfficeIntegration
+from nixi.integrations.vscode import VSCodeIntegration
+from nixi.automation.browser import BrowserController
 from nixi.audio.audio_capture import AudioCapture
 from nixi.audio.stt import SpeechTranscriber
 from nixi.audio.tts import NixiTTS, SentenceStreamer
-from nixi.audio.wake_word import WakeWordDetector
+from nixi.audio.wake_word import WakeWordDetector, VoiceGate
 
 # Autonomous Agent Pillars
 from nixi.agent.memory import AgentMemory
@@ -62,7 +68,6 @@ from nixi.i18n.catalog import I18N
 try:
     from nixi.security.vault import Vault
     from nixi.automation.recorder import MacroRecorder
-    from nixi.automation.browser import BrowserController
     from nixi.ui.notifications import NotificationCenter
     from nixi.ui.timeline import Timeline
     from nixi.ui.themes import palette
@@ -77,6 +82,7 @@ class Bridge(QObject):
     status_changed = pyqtSignal(str, str)
     audio_level_changed = pyqtSignal(float)
     chat_message_received = pyqtSignal(str, bool)
+    chat_stream_update = pyqtSignal(str)
     dictate_state_changed = pyqtSignal(bool)
     expand_island_signal = pyqtSignal()
     collapse_island_signal = pyqtSignal()
@@ -112,11 +118,16 @@ class NixiApp:
         self.timer_mgr = TimerManager()
         self.god_agent = GodModeAgent(self.llm)
         whisper_size = self.config.whisper_model
-        if self.config.stt_language.lower().startswith(("hi", "hinglish")) and whisper_size.endswith(".en"):
+        # Multilingual Whisper is necessary for Hindi/Hinglish and still understands English.
+        if whisper_size.endswith(".en"):
             whisper_size = whisper_size[:-3]
         self.stt = SpeechTranscriber(model_size=whisper_size, preload=True)
         self.tts = NixiTTS()
         self.wake_detector = WakeWordDetector()
+        gate_mode = "push_to_talk" if self.config.push_to_talk else self.config.voice_gate_mode
+        self.voice_gate = VoiceGate(mode=gate_mode, hotkey=self.config.push_to_talk_hotkey)
+        self._ptt_held = threading.Event()
+        self._ptt_utterance = threading.Event()
 
         # Agent Pillars: Persistent Memory, ReAct Planner, Vision Co-Pilot
         self.memory = AgentMemory()
@@ -133,9 +144,16 @@ class NixiApp:
         self.vision_guard = VisionGuard(config=self.config, indicator=self._vision_indicator)
         self.journal = ActionJournal(enabled=self.config.audit_enabled)
         self.undo_manager = UndoManager(config=self.config, journal=self.journal)
+        self.file_actions = FileActionService(self.undo_manager)
+        self.office = OfficeIntegration(self.file_actions)
+        self.vscode = VSCodeIntegration(self.file_actions)
+        self.browser = BrowserController(llm_client=self.llm)
+        self.task_center = TaskCenter()
         self.permissions = PermissionManager(config=self.config, confirm_callback=self._confirm_action, journal=self.journal)
         self.llm._permission_manager = self.permissions
         self.god_agent.permissions = self.permissions
+        self.react_planner.permissions = self.permissions
+        self.react_planner.undo_manager = self.undo_manager
         # Knowledge, calculator, plugins, API
         self.knowledge = KnowledgeStore(config=self.config)
         self.calculator = Calculator()
@@ -157,11 +175,10 @@ class NixiApp:
             self.i18n = I18N(locale=self.config.tts_language if self.config.tts_language in ('en','hi','hinglish') else 'en')
             self.vault = Vault(config=self.config)
             self.macros = MacroRecorder(config=self.config)
-            self.browser = BrowserController(llm_client=self.llm)
             self.notifs = NotificationCenter(config=self.config)
             self.timeline = Timeline(config=self.config)
         else:
-            self.i18n=self.vault=self.macros=self.browser=self.notifs=self.timeline=None
+            self.i18n=self.vault=self.macros=self.notifs=self.timeline=None
         if self.config.api_enabled:
             print(self.api_server.start())
         # System tray
@@ -181,7 +198,13 @@ class NixiApp:
 
         # UI: Dynamic Island with stylized cartoon eyes and hover expansion
         self.island = NixiDynamicIsland()
+        self.island.set_task_center(self.task_center.snapshot, self.task_center.cancel)
         self._wire_signals()
+        prior_messages = self.memory.get_history(limit=40)
+        if prior_messages:
+            self.island.clear_chat()
+            for message in prior_messages:
+                self.island.add_chat_message(message.get("content", ""), message.get("role") == "user")
 
         # Start Proactive Background Daemons
         self.battery_daemon.start()
@@ -196,7 +219,8 @@ class NixiApp:
             on_speech_detected=self._on_speech_start,
             on_speech_finished=self._on_speech_done,
             on_audio_level=lambda lvl: self.bridge.audio_level_changed.emit(lvl),
-            is_tts_speaking=lambda: self.tts.is_speaking
+            is_tts_speaking=lambda: self.tts.is_speaking,
+            is_ptt_held=self._ptt_held.is_set,
         )
 
         # Chat history memory for LLM
@@ -222,7 +246,12 @@ class NixiApp:
         # Bridge to UI
         self.bridge.status_changed.connect(self.island.set_status)
         self.bridge.audio_level_changed.connect(self.island.set_audio_level)
-        self.bridge.chat_message_received.connect(lambda msg, is_user: self.island.set_response(msg))
+        self.bridge.chat_message_received.connect(self.island.add_chat_message)
+        self.bridge.chat_message_received.connect(self._persist_chat_message)
+        self.bridge.chat_stream_update.connect(self.island.update_assistant_stream)
+        self.island.user_message_signal.connect(
+            lambda text: self.bridge.chat_message_received.emit(text, True)
+        )
         self.bridge.expand_island_signal.connect(self.island.expand)
         self.bridge.collapse_island_signal.connect(self.island.collapse)
 
@@ -258,6 +287,17 @@ class NixiApp:
                 keyboard.add_hotkey('F8', lambda: self.island.mic_btn.toggle())
                 keyboard.add_hotkey('F9', lambda: self.island.collapse() if self.island.is_expanded else self.island.expand())
                 keyboard.add_hotkey('F10', self._handle_screen_vision)
+                keyboard.add_hotkey('esc', self._interrupt_current_task)
+                if self.voice_gate.mode == "push_to_talk":
+                    hotkey = self.config.push_to_talk_hotkey
+                    key_name = hotkey.split("+")[-1].strip()
+                    def _ptt_down():
+                        self._ptt_held.set()
+                        self.bridge.status_changed.emit("Push to talk", "listening")
+                    def _ptt_up(_event=None):
+                        self._ptt_held.clear()
+                    keyboard.add_hotkey(hotkey, _ptt_down, trigger_on_release=False)
+                    keyboard.on_release_key(key_name, _ptt_up)
                 try:
                     keyboard.add_hotkey(self.config.hotkey_palette, self._open_palette)
                 except Exception:
@@ -271,6 +311,15 @@ class NixiApp:
         state = "on" if enabled else "off"
         self.tts.speak(f"Screen vision {state}")
 
+    def _interrupt_current_task(self):
+        task_id = self.task_center.cancel_latest()
+        self.tts.stop()
+        if task_id:
+            self.bridge.status_changed.emit("Cancellation requested", "thinking")
+            self.bridge.chat_message_received.emit("Cancellation requested; Nixi will stop at the next safe checkpoint.", False)
+        else:
+            self.bridge.status_changed.emit("Speech stopped", "happy")
+
     def _toggle_dictation(self, enabled: bool):
         self.dictation.set_active(enabled)
         if enabled:
@@ -281,6 +330,8 @@ class NixiApp:
             self.island.set_status("Idle", "happy")
 
     def _on_speech_start(self):
+        if self._ptt_held.is_set():
+            self._ptt_utterance.set()
         if self.dictation.is_active:
             self.bridge.status_changed.emit("Dictating...", "listening")
         else:
@@ -296,18 +347,27 @@ class NixiApp:
             elapsed = time.monotonic() - started
             print(f"[Perf] speech recognition completed in {elapsed:.2f}s")
             if not text:
+                self._ptt_utterance.clear()
                 if not self.dictation.is_active and not self.tts.is_speaking:
                     self.bridge.status_changed.emit("Didn't catch that — try again", "listening")
                     self._delayed_status("Idle", "happy", 2.0)
                 return
             print(f"[Nixi Voice] Heard: '{text}'")
+            lower_txt = text.lower().strip()
             if self.tts.is_speaking:
-                interrupt_words = {"stop", "quiet", "shut up", "cancel", "pause", "halt"}
-                lower_txt = text.lower().strip()
-                if any(w in lower_txt for w in interrupt_words):
+                interrupt_words = {"stop", "quiet", "shut up", "cancel", "pause", "halt", "stop nixi"}
+                if any(w == lower_txt or w in lower_txt.split() for w in interrupt_words):
                     self.tts.stop()
+                    self.task_center.cancel_latest()
                     self.bridge.status_changed.emit("Stopped", "happy")
                     self._delayed_status("Idle", "happy", 1.0)
+                return
+            if lower_txt in {"cancel", "cancel task", "stop task", "stop current task", "cancel current task"}:
+                task_id = self.task_center.cancel_latest()
+                self.tts.stop()
+                msg = "Cancellation requested." if task_id else "There is no active task to cancel."
+                self.bridge.chat_message_received.emit(msg, False)
+                self.bridge.status_changed.emit("Stopping..." if task_id else "Idle", "thinking" if task_id else "happy")
                 return
             if self.dictation.is_active:
                 if "stop dictation" in text.lower():
@@ -319,11 +379,12 @@ class NixiApp:
                 self.dictation.inject_text(text)
                 self.bridge.status_changed.emit(f"Typed: {text[:16]}", "listening")
                 return
-            wake_enabled = os.getenv("WAKE_WORD_ENABLED", "false").lower() == "true"
-            if getattr(self.config, "wake_word_enabled", False):
-                wake_enabled = True
+            wake_enabled = os.getenv("WAKE_WORD_ENABLED", "false").lower() == "true" or self.config.wake_word_enabled
             is_wake, command = self.wake_detector.check(text)
-            should_process = (not wake_enabled) or is_wake or getattr(self.island, "is_expanded", False)
+            ptt_was_held = self._ptt_held.is_set() or self._ptt_utterance.is_set()
+            self._ptt_utterance.clear()
+            gate_allows = self.voice_gate.is_allowed(is_wake, ptt_was_held)
+            should_process = gate_allows and ((not wake_enabled) or is_wake or getattr(self.island, "is_expanded", False))
             if should_process:
                 actual_cmd = (command if is_wake and command else text).strip()
                 print(f"[Nixi Voice] Executing command: '{actual_cmd}'")
@@ -349,7 +410,7 @@ class NixiApp:
             r"move|rename|delete|remove|install|run|execute|scaffold|build)\b", text)
         return bool(imperative)
 
-    def _run_action_tools(self, command: str) -> str:
+    def _run_action_tools(self, command: str, task_id: str | None = None) -> str:
         """Let the model select from explicit built-in system skills (never an implicit shell)."""
         from nixi.security.permissions import RiskLevel
         from nixi.agent.tools_registry import AgentToolsRegistry
@@ -360,29 +421,54 @@ class NixiApp:
             )
 
         def create_note(content: str = "", filename: str = "nixi_note.txt") -> str:
-            # Never implicitly copy clipboard contents into a new file.
+            # Never read clipboard implicitly; create exclusively and refuse overwrites.
+            relative = f"Desktop/{Path(filename).name}"
             note_text = content.strip() if content and content.strip() else "# Note\n\n"
-            return AgentToolsRegistry.create_and_open_note(
-                content=note_text, filename=filename, folder="Desktop"
-            )
+            result = self.file_actions.create_file(relative, note_text)
+            if result.startswith("Created and verified"):
+                return f"{result}. {system.open_file(str(self.file_actions._resolve(relative)))}"
+            return result
 
         system = self.god_agent.system
         tools = {
             "open_app": {"description": "Open a locally installed desktop app by its common name.", "function": self.app_launcher.launch, "risk": RiskLevel.SAFE},
             "get_system_status": {"description": "Read CPU, memory, disk and battery status.", "function": system.get_system_stats, "risk": RiskLevel.SAFE},
-            "find_files": {"description": "Find files in Desktop, Documents and Downloads using a filename fragment.", "function": system.search_files, "risk": RiskLevel.SAFE},
-            "open_website": {"description": "Open a website URL in the user's default browser.", "function": system.open_url, "risk": RiskLevel.SAFE},
+            "find_files": {"description": "Find files in Desktop, Documents, Downloads or Pictures using a filename fragment.", "function": self.file_actions.find_files, "risk": RiskLevel.SAFE},
+            "create_file": {"description": "Create a new text file under the user's home folder without overwriting existing files. Args: path, content.", "function": self.file_actions.create_file, "risk": RiskLevel.HIGH},
+            "move_file": {"description": "Move a file within the user's home folder. Args: source, destination. It is undoable and refuses overwrites.", "function": self.file_actions.move_file, "risk": RiskLevel.HIGH},
+            "rename_file": {"description": "Rename a file within its current folder. Args: source, new_name. It is undoable and refuses overwrites.", "function": self.file_actions.rename_file, "risk": RiskLevel.HIGH},
+            "trash_file": {"description": "Move a file into Nixi's recoverable trash. Args: path.", "function": self.file_actions.trash_file, "risk": RiskLevel.CRITICAL},
+            "undo_last_file_action": {"description": "Undo the latest supported file move, trash, or Nixi-created file.", "function": self.undo_manager.undo_last, "risk": RiskLevel.SAFE},
+            "open_folder": {"description": "Open an existing folder in the user's file manager. Args: path.", "function": system.open_folder, "risk": RiskLevel.SAFE},
+            "open_settings_page": {"description": "Open an allow-listed Windows Settings page; category can be system, display, sound, bluetooth, network, wifi, apps, notifications, updates, privacy.", "function": system.open_settings, "risk": RiskLevel.SAFE},
             "set_volume": {"description": "Set system volume percentage from 0 to 100.", "function": system.set_audio_volume, "risk": RiskLevel.SAFE},
             "media_control": {"description": "Control media playback: play_pause, next, prev, or stop.", "function": system.media_control, "risk": RiskLevel.SAFE},
             "organize_folder": {"description": "Sort files into category subfolders; does not delete files.", "function": organize, "risk": RiskLevel.HIGH},
-            "create_note": {"description": "Create a text note on the Desktop and open it.", "function": create_note, "risk": RiskLevel.HIGH},
+            "create_note": {"description": "Create a text note on the Desktop and open it without overwriting existing files.", "function": create_note, "risk": RiskLevel.HIGH},
+            "create_word_document": {"description": "Create a new .docx file under the home folder without overwriting. Args: path, title, body.", "function": self.office.create_word_document, "risk": RiskLevel.HIGH},
+            "read_word_document": {"description": "Read text from a .docx file under the home folder. Args: path.", "function": self.office.read_word_document, "risk": RiskLevel.SAFE},
+            "create_excel_workbook": {"description": "Create a new .xlsx workbook under the home folder. Args: path, sheet_name, rows (array of arrays). Never overwrites.", "function": self.office.create_workbook, "risk": RiskLevel.HIGH},
+            "read_excel_workbook": {"description": "Read up to 100 rows from a .xlsx workbook under the home folder. Args: path, sheet_name.", "function": self.office.read_workbook, "risk": RiskLevel.SAFE},
+            "open_vscode_project": {"description": "Open an existing project directory under the home folder in VS Code. Args: path.", "function": self.vscode.open_project, "risk": RiskLevel.SAFE},
+            "open_vscode_file": {"description": "Open an existing file under the home folder in VS Code. Args: path.", "function": self.vscode.open_file, "risk": RiskLevel.SAFE},
+            "open_website": {"description": "Open a website URL in the browser.", "function": self.browser.open_url, "risk": RiskLevel.SAFE},
+            "browser_action": {"description": "Perform one bounded browser interaction: click a visible control, fill a named field, press a safe key, or read the current page. Args: instruction. Requires user confirmation.", "function": lambda instruction: self.browser.act(instruction), "risk": RiskLevel.HIGH},
             "window_action": {"description": "Manage windows: show desktop, snap left/right, maximize, close active, switch, or lock.", "function": system.window_management, "risk": RiskLevel.HIGH},
             "kill_process": {"description": "Stop a named process or PID. Use only when specifically requested.", "function": AgentToolsRegistry.kill_process, "risk": RiskLevel.CRITICAL},
         }
-        return self.llm.tool_loop(
+        def on_tool_start(name: str, args: dict):
+            detail = f"Preparing {name.replace('_', ' ')}"
+            if task_id:
+                self.task_center.update(task_id, detail, progress=45)
+            self.bridge.status_changed.emit(detail, "thinking")
+        result = self.llm.tool_loop(
             [{"role": "user", "content": command}], tools=tools, max_iters=2,
-            temperature=0.0,
+            temperature=0.0, on_tool_start=on_tool_start,
         )
+        cancel_event = self.task_center.cancel_event(task_id) if task_id else None
+        if cancel_event and cancel_event.is_set():
+            return "Stopped after the current safe step."
+        return result
 
     def _execute_command_text(self, cmd: str):
         """Analyze user command asynchronously without freezing the UI thread."""
@@ -391,6 +477,13 @@ class NixiApp:
             return
 
         cmd = cmd.strip()
+        if cmd.casefold() in {"cancel", "cancel task", "cancel the task", "cancel current", "cancel current task", "stop", "stop task", "stop the task", "stop current", "stop current task"}:
+            task_id = self.task_center.cancel_latest()
+            self.tts.stop()
+            message = "Cancellation requested." if task_id else "There is no active task to cancel."
+            self.bridge.chat_message_received.emit(message, False)
+            self.bridge.status_changed.emit("Stopping..." if task_id else "Idle", "thinking" if task_id else "happy")
+            return
         now = time.monotonic()
         # Speech recognizers may emit the same completed utterance twice; ignore duplicates.
         if cmd.casefold() == getattr(self, "_last_cmd_text", "").casefold() and now - getattr(self, "_last_cmd_ts", 0.0) < 1.5:
@@ -400,14 +493,27 @@ class NixiApp:
         command_generation = self._status_generation
         command_done = threading.Event()
         asynchronous = [False]
+        command_failed = [False]
+        task_id = self.task_center.start(cmd)
+        cancel_event = self.task_center.cancel_event(task_id)
         self.bridge.status_changed.emit(f"Working: {cmd[:28]}", "thinking")
 
         def runner():
+            self.task_center.update(task_id, "Starting", progress=5)
             try:
+                if cancel_event.is_set():
+                    return
                 lower = cmd.lower().strip()
 
                 # Clean conversational politeness prefixes
                 clean = re.sub(r"^(?:please\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+|hey\s+nixi\s+|nixi\s+)", "", lower).strip()
+                self.task_center.update(task_id, "Interpreting request", progress=10)
+
+                if clean in {"undo", "undo last", "undo last action", "reverse last action"}:
+                    result = self.undo_manager.undo_last()
+                    self.bridge.chat_message_received.emit(result, False)
+                    self.bridge.status_changed.emit("Done", "happy")
+                    return
 
                 # 0. Long-term memory extraction: e.g. "remember that I prefer dark mode and Python 3.12"
                 extracted_fact = self.memory.try_extract_memory(cmd)
@@ -463,6 +569,9 @@ class NixiApp:
                     self.tts.speak("Decomposing goal into steps.")
 
                     def on_step_progress(curr, total, step_name):
+                        if cancel_event.is_set():
+                            raise InterruptedError("Task cancelled at a safe checkpoint")
+                        self.task_center.update(task_id, step_name, progress=int(10 + 80 * curr / max(total, 1)))
                         self.bridge.status_changed.emit(f"Step {curr}/{total}: {step_name[:18]}", "thinking")
                         self.tts.speak(f"Executing step {curr} of {total}: {step_name}")
 
@@ -524,8 +633,9 @@ class NixiApp:
 
                 # Natural-language actions can use built-in skills, never an invisible raw shell.
                 if self._is_action_request(clean):
-                    self.bridge.status_changed.emit("Choosing a system action...", "thinking")
-                    action_result = self._run_action_tools(cmd)
+                    self.task_center.update(task_id, "Choosing a built-in skill", progress=25)
+                    self.bridge.status_changed.emit("Planning safe system action...", "thinking")
+                    action_result = self._run_action_tools(cmd, task_id=task_id)
                     self.bridge.chat_message_received.emit(action_result, False)
                     self.tts.speak(action_result)
                     self.bridge.status_changed.emit("Done", "happy")
@@ -534,16 +644,24 @@ class NixiApp:
 
                 # 5. General LLM Query with concurrent sentence-by-sentence voice streaming
                 asynchronous[0] = True
-                self._ask_llm(cmd, finished_event=command_done)
+                self._ask_llm(cmd, finished_event=command_done, task_id=task_id)
             except Exception as e:
-                err_text = f"Notice: {e}"
+                command_failed[0] = True
+                err_text = "Task cancelled at a safe checkpoint." if cancel_event.is_set() else f"Notice: {e}"
                 self.bridge.chat_message_received.emit(err_text, False)
-                self.tts.speak(err_text)
+                if not cancel_event.is_set():
+                    self.tts.speak(err_text)
                 self._delayed_status("Idle", "happy", 2.5)
                 command_done.set()
+                self.task_center.finish(task_id, err_text, failed=not cancel_event.is_set())
             finally:
                 if not asynchronous[0]:
                     command_done.set()
+                    self.task_center.finish(
+                        task_id,
+                        "Cancelled" if cancel_event.is_set() else "Completed",
+                        failed=command_failed[0] and not cancel_event.is_set(),
+                    )
 
         threading.Thread(target=runner, name="nixi-command", daemon=True).start()
         def command_watchdog():
@@ -632,11 +750,14 @@ class NixiApp:
         )
         return any(trig in lower for trig in triggers)
 
-    def _ask_llm(self, query: str, finished_event: threading.Event | None = None):
+    def _ask_llm(self, query: str, finished_event: threading.Event | None = None, task_id: str | None = None):
         """Stream model response with live progress and a bounded wait/fallback."""
         request_generation = getattr(self, "_status_generation", 0)
+        cancel_event = self.task_center.cancel_event(task_id) if task_id else None
         response_started = threading.Event()
         self.bridge.status_changed.emit("Connecting...", "thinking")
+        if task_id:
+            self.task_center.update(task_id, "Waiting for response", progress=25)
         self.tts.stop()
 
         # Check if live screen vision should be included (Always-On mode OR visual intent)
@@ -662,10 +783,6 @@ class NixiApp:
             user_turn_content = query
 
         self.conversation_history.append({"role": "user", "content": query})
-        try:
-            self.memory.add_message("user", query)
-        except Exception:
-            pass
         if len(self.conversation_history) > 10:
             self.conversation_history = self.conversation_history[-10:]
 
@@ -685,44 +802,58 @@ class NixiApp:
         def worker():
             collected = []
             first_chunk = True
-            # Concurrent sentence streamer feeds voice *then and there* while text streams!
+            failed = False
+            # Concurrent sentence streamer feeds voice while text streams.
             streamer = SentenceStreamer(self.tts, max_speech_sentences=50)
             try:
                 for chunk in self.llm.chat_stream(stream_messages):
+                    if cancel_event and cancel_event.is_set():
+                        self.tts.stop()
+                        break
                     collected.append(chunk)
                     if first_chunk:
                         first_chunk = False
                         response_started.set()
+                        if task_id:
+                            self.task_center.update(task_id, "Receiving response", progress=55)
                         self.bridge.status_changed.emit("Answering...", "thinking")
-                    # Real-time token streaming into the UI!
-                    self.bridge.chat_message_received.emit("".join(collected), False)
-                    # Feed chunk into sentence audio streamer immediately!
+                    self.bridge.chat_stream_update.emit("".join(collected))
                     streamer.feed(chunk)
 
-                # Flush any remaining text in sentence buffer to voice
-                streamer.finish()
-
+                was_cancelled = bool(cancel_event and cancel_event.is_set())
                 full_reply = "".join(collected).strip()
-                if not full_reply:
-                    full_reply = "I didn't receive a response from the model."
-
-                self.conversation_history.append({"role": "assistant", "content": full_reply})
-                try:
-                    self.memory.add_message("assistant", full_reply)
-                except Exception:
-                    pass
-                self.bridge.status_changed.emit("Idle", "happy")
+                if was_cancelled:
+                    self.tts.stop()
+                    if collected:
+                        self.bridge.chat_stream_update.emit(full_reply + "\n\n[Cancelled]")
+                    else:
+                        self.bridge.chat_message_received.emit("Task cancelled.", False)
+                    self.bridge.status_changed.emit("Cancelled", "happy")
+                else:
+                    streamer.finish()
+                    full_reply = full_reply or "I didn't receive a response from the model."
+                    self.conversation_history.append({"role": "assistant", "content": full_reply})
+                    try:
+                        self.memory.add_message("assistant", full_reply)
+                    except Exception:
+                        pass
+                    self.bridge.status_changed.emit("Done", "happy")
+                if task_id:
+                    self.task_center.finish(task_id, "Cancelled" if was_cancelled else (full_reply or "No response"))
 
             except Exception as e:
+                failed = True
                 err_text = str(e)
-                if "502" in err_text or "Bad Gateway" in err_text:
-                    fallback_msg = "Upstream provider is momentarily busy. Retrying in background..."
-                else:
-                    fallback_msg = f"Notice: {err_text}"
+                fallback_msg = "The model request was interrupted." if cancel_event and cancel_event.is_set() else f"Notice: {err_text}"
                 self.bridge.chat_message_received.emit(fallback_msg, False)
-                self.tts.speak(fallback_msg)
+                if not (cancel_event and cancel_event.is_set()):
+                    self.tts.speak(fallback_msg)
+                if task_id:
+                    self.task_center.finish(task_id, fallback_msg, failed=True)
             finally:
                 response_started.set()
+                if task_id and failed:
+                    self.task_center.finish(task_id, "Request failed", failed=True)
                 if finished_event is not None:
                     finished_event.set()
                 self._delayed_status("Idle", "happy", 2.5)
@@ -734,6 +865,12 @@ class NixiApp:
         threading.Thread(target=worker, name="nixi-llm", daemon=True).start()
 
     # ── New helpers ─────────────────────────────────────────────────
+    def _persist_chat_message(self, text: str, is_user: bool) -> None:
+        try:
+            self.memory.add_message("user" if is_user else "assistant", text)
+        except Exception:
+            pass
+
     def _vision_indicator(self, active: bool, title: str) -> None:
         try:
             if active:
@@ -808,6 +945,11 @@ class NixiApp:
     def _quit_app(self) -> None:
         try:
             self.audio.stop()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "browser", None):
+                self.browser.close()
         except Exception:
             pass
         for d in (getattr(self, 'battery_daemon', None), getattr(self, 'clipboard_daemon', None), getattr(self, 'briefing_daemon', None)):

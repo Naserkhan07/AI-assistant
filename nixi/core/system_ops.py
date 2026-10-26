@@ -10,7 +10,7 @@ from typing import Any
 
 from nixi.config import NixiConfig, get_config
 from nixi.platform.capabilities import IS_WINDOWS, has_module
-from nixi.platform.system import disk_root, run_shell, system_stats
+from nixi.platform.system import disk_root, open_path, system_stats
 from nixi.compat.optional import load
 from nixi.compat import fakes
 
@@ -156,8 +156,39 @@ class SystemOps:
         return system_stats()
 
     @staticmethod
-    def run_powershell(command: str, timeout_sec: int = 15) -> str:
-        return run_shell(command, timeout=timeout_sec)
+    def open_settings(category: str = "system") -> str:
+        """Open an allow-listed Windows Settings page without a shell."""
+        if not IS_WINDOWS:
+            return "Windows Settings pages are only available on Windows."
+        pages = {
+            "system": "about", "display": "display", "sound": "sound",
+            "bluetooth": "bluetooth", "network": "network", "wifi": "network-wifi",
+            "apps": "appsfeatures", "notifications": "notifications",
+            "updates": "windowsupdate", "privacy": "privacy",
+        }
+        key = category.strip().lower()
+        uri = pages.get(key)
+        if not uri:
+            return f"Unsupported Settings category: {category}"
+        try:
+            os.startfile(f"ms-settings:{uri}")  # type: ignore[attr-defined]
+            return f"Opened Windows Settings: {key}."
+        except Exception as exc:
+            return f"Could not open Windows Settings: {exc}"
+
+    @staticmethod
+    def open_folder(path: str) -> str:
+        target = Path(path).expanduser()
+        if not target.is_dir():
+            return f"Folder not found: {target}"
+        return f"Opened folder {target}" if open_path(target) else f"Could not open folder {target}"
+
+    @staticmethod
+    def open_file(path: str) -> str:
+        target = Path(path).expanduser()
+        if not target.is_file():
+            return f"File not found: {target}"
+        return f"Opened file {target}" if open_path(target) else f"Could not open file {target}"
 
     @staticmethod
     def search_files(pattern: str, search_root: str | None = None, max_results: int = 8) -> list[str]:
@@ -246,5 +277,9 @@ class SystemOps:
     def open_url(url: str) -> str:
         if not url.startswith(("http://", "https://")):
             url = f"https://{url}"
-        webbrowser.open(url)
-        return f"Opened {url} in browser."
+        try:
+            accepted = webbrowser.open(url)
+            return (f"Sent {url} to the default browser; I can't verify the window opened."
+                    if accepted else f"The default browser did not accept the request for {url}.")
+        except Exception as exc:
+            return f"Could not open {url}: {exc}"

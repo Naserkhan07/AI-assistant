@@ -1,108 +1,39 @@
-# ══════════════════════════════════════════════════════════════════════════════
-# NIXI AI DESKTOP ASSISTANT — MASTER SETUP SCRIPT
-# Run: .\setup.ps1 from PowerShell in project root
-# ══════════════════════════════════════════════════════════════════════════════
-
-$ErrorActionPreference = "Continue"
+param([switch]$InstallBrowser)
+$ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
+Write-Host "Nixi setup" -ForegroundColor Cyan
 
-Write-Host ""
-Write-Host "╔════════════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║              NIXI AI DESKTOP ASSISTANT — MASTER SETUP                  ║" -ForegroundColor Cyan
-Write-Host "║   (Minimal Floating Pill • Streaming Voice • Screen Vision Agent)      ║" -ForegroundColor Cyan
-Write-Host "╚════════════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
-Write-Host ""
-
-# ── 1. Check Python ───────────────────────────────────────────────────────────
-Write-Host "[1/5] Checking Python..." -ForegroundColor Yellow
-try {
-    $pyver = python --version 2>&1
-    Write-Host "  Found: $pyver" -ForegroundColor Green
-} catch {
-    Write-Host "  ERROR: Python not found. Please install Python 3.10+." -ForegroundColor Red
-    exit 1
+$python = Get-Command python -ErrorAction SilentlyContinue
+if (-not $python) { throw "Python 3.10+ was not found. Install Python and retry." }
+$version = & python -c "import sys; print('%d.%d' % sys.version_info[:2])"
+$parts = $version.Split('.') | ForEach-Object { [int]$_ }
+if (($parts[0] -lt 3) -or (($parts[0] -eq 3) -and ($parts[1] -lt 10))) {
+    throw "Nixi requires Python 3.10+. Found $version"
 }
 
-# ── 2. Check Node.js & npm (for FreeLLMAPI) ──────────────────────────────────
-Write-Host "[2/5] Checking Node.js (for FreeLLMAPI gateway)..." -ForegroundColor Yellow
-try {
-    $nodever = node --version 2>&1
-    $npmver = npm --version 2>&1
-    Write-Host "  Found Node: $nodever, npm: $npmver" -ForegroundColor Green
-} catch {
-    Write-Host "  WARNING: Node.js or npm not found. FreeLLMAPI gateway requires Node 18+." -ForegroundColor Yellow
-}
-
-# ── 3. Virtual Environment ───────────────────────────────────────────────────
-Write-Host "[3/5] Setting up Python virtual environment..." -ForegroundColor Yellow
-if (-not (Test-Path "app\.venv")) {
-    python -m venv app\.venv
-    Write-Host "  Created app\.venv" -ForegroundColor Green
-} else {
-    Write-Host "  app\.venv exists ✓" -ForegroundColor Green
-}
-
-$venvPython = "$PSScriptRoot\app\.venv\Scripts\python.exe"
-$venvPip    = "$PSScriptRoot\app\.venv\Scripts\pip.exe"
-
+$venvPython = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path $venvPython)) {
-    Write-Host "  ERROR: venv python not found at $venvPython" -ForegroundColor Red
-    exit 1
+    & python -m venv (Join-Path $PSScriptRoot ".venv")
+}
+if (-not (Test-Path $venvPython)) { throw "Could not create .venv" }
+
+Write-Host "Installing Python dependencies..." -ForegroundColor Yellow
+& $venvPython -m pip install --upgrade pip
+if ($LASTEXITCODE -ne 0) { throw "Could not upgrade pip." }
+& $venvPython -m pip install -r (Join-Path $PSScriptRoot "requirements.txt")
+if ($LASTEXITCODE -ne 0) { throw "Python dependency installation failed." }
+if ($InstallBrowser) {
+    Write-Host "Installing Playwright Chromium for controlled browser actions..." -ForegroundColor Yellow
+    & $venvPython -m playwright install chromium
+    if ($LASTEXITCODE -ne 0) { throw "Playwright Chromium installation failed." }
 }
 
-# ── 4. Install Dependencies ──────────────────────────────────────────────────
-Write-Host "[4/5] Installing Python dependencies into virtual environment..." -ForegroundColor Yellow
-& $venvPython -m pip install --upgrade pip --quiet
-Write-Host "  Pip upgraded ✓" -ForegroundColor Green
-
-if (Test-Path "requirements.txt") {
-    Write-Host "  Installing dependencies from requirements.txt..." -ForegroundColor Yellow
-    & $venvPip install -r requirements.txt --quiet
-    Write-Host "  Nixi requirements installed ✓" -ForegroundColor Green
+if (-not (Test-Path (Join-Path $PSScriptRoot ".env")) -and (Test-Path (Join-Path $PSScriptRoot ".env.example"))) {
+    Copy-Item (Join-Path $PSScriptRoot ".env.example") (Join-Path $PSScriptRoot ".env")
+    Write-Host "Created .env from .env.example; add provider settings if desired." -ForegroundColor Yellow
 }
 
-# ── 5. Environment & FreeLLMAPI Setup ────────────────────────────────────────
-Write-Host "[5/5] Configuring environment & FreeLLMAPI..." -ForegroundColor Yellow
-
-if (-not (Test-Path ".env") -and (Test-Path ".env.example")) {
-    Copy-Item ".env.example" ".env"
-    Write-Host "  Created .env from .env.example ✓" -ForegroundColor Green
-}
-
-if (Test-Path "repos\freellmapi") {
-    if (-not (Test-Path "repos\freellmapi\node_modules")) {
-        Write-Host "  Installing FreeLLMAPI node_modules..." -ForegroundColor Yellow
-        Push-Location "repos\freellmapi"
-        try {
-            npm install --no-audit --no-fund
-            Write-Host "  FreeLLMAPI dependencies installed ✓" -ForegroundColor Green
-        } catch {
-            Write-Host "  Note: Run 'npm install' inside repos/freellmapi if needed." -ForegroundColor Yellow
-        }
-        Pop-Location
-    } else {
-        Write-Host "  FreeLLMAPI dependencies present ✓" -ForegroundColor Green
-    }
-
-    # Seed keyless zero-cost providers
-    if (Test-Path "scripts\add-keyless-providers.mjs") {
-        Push-Location "repos\freellmapi"
-        node add-keyless-providers.mjs 2>$null | Out-Null
-        Pop-Location
-        Write-Host "  Keyless providers seeded ✓" -ForegroundColor Green
-    }
-}
-
-Write-Host ""
-Write-Host "╔════════════════════════════════════════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "║  NIXI SETUP COMPLETE!                                                  ║" -ForegroundColor Green
-Write-Host "║                                                                        ║" -ForegroundColor Green
-Write-Host "║  To launch Nixi Assistant:                                             ║" -ForegroundColor Green
-Write-Host "║    .\start.ps1                                                         ║" -ForegroundColor Green
-Write-Host "║                                                                        ║" -ForegroundColor Green
-Write-Host "║  Shortcuts:                                                            ║" -ForegroundColor Green
-Write-Host "║    F8  = Dictation Toggle (Speech-to-Text directly into focused app)   ║" -ForegroundColor Green
-Write-Host "║    F9  = Expand/Collapse Dynamic Island Chat Drawer                    ║" -ForegroundColor Green
-Write-Host "║    F10 = Screen Vision (Analyze screenshot via Vision AI)              ║" -ForegroundColor Green
-Write-Host "╚════════════════════════════════════════════════════════════════════════╝" -ForegroundColor Green
-Write-Host ""
+Write-Host "Running setup diagnostics..." -ForegroundColor Yellow
+& $venvPython -m nixi.cli doctor
+if ($LASTEXITCODE -ne 0) { throw "Nixi diagnostics failed." }
+Write-Host "Setup complete. Start Nixi with .\start.ps1" -ForegroundColor Green

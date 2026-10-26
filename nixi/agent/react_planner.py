@@ -15,6 +15,15 @@ class ReActPlanner:
         self.llm = llm_client
         self.memory = memory or AgentMemory()
         self.tools = AgentToolsRegistry(llm_client)
+        self.permissions = None
+        self.undo_manager = None
+
+    def _authorize_change(self, action: str, args: dict) -> tuple[bool, str]:
+        if self.permissions is None:
+            return True, ""
+        from nixi.security.permissions import RiskLevel
+        decision = self.permissions.authorize(action, RiskLevel.HIGH, args)
+        return decision.allowed, decision.reason
 
     @staticmethod
     def is_complex_agent_goal(prompt: str) -> bool:
@@ -57,14 +66,22 @@ class ReActPlanner:
 
         # Fast path 1: Downloads cleanup
         if "clean" in lower_goal and "download" in lower_goal:
+            allowed, reason = self._authorize_change("organize_folder", {"folder": "Downloads", "delete": False})
+            if not allowed:
+                return False, f"Not run: {reason}"
             if on_step_progress:
-                on_step_progress(1, 1, "Organizing Downloads folder...")
-            res = self.tools.organize_folder(delete_old_installers=True, days_old=30)
+                on_step_progress(1, 1, "Organizing Downloads folder (undoable; no deletions)...")
+            res = self.tools.organize_folder(
+                delete_old_installers=False, undo_manager=self.undo_manager
+            )
             self.memory.log_task(goal, "Completed", 1, res)
             return True, res
 
         # Fast path 2: Bulk image conversion
         if "convert" in lower_goal and "webp" in lower_goal:
+            allowed, reason = self._authorize_change("convert_images_to_webp", {"folder": "Pictures", "delete_original": False})
+            if not allowed:
+                return False, f"Not run: {reason}"
             if on_step_progress:
                 on_step_progress(1, 1, "Converting images to WebP...")
             import os
@@ -88,6 +105,9 @@ class ReActPlanner:
 
         # Fast path 4: Scaffolding
         if "scaffold" in lower_goal or ("create" in lower_goal and ("fastapi" in lower_goal or "flask" in lower_goal)):
+            allowed, reason = self._authorize_change("scaffold_project", {"goal": raw_goal})
+            if not allowed:
+                return False, f"Not run: {reason}"
             ptype = "fastapi" if "fastapi" in lower_goal else "flask"
             m = re.search(r"(?:called|named|project)\s+([a-zA-Z0-9_-]+)", lower_goal)
             pname = m.group(1) if m else f"{ptype}_app"

@@ -43,6 +43,6 @@ def test_system_stats_shape():
     s = system_stats()
     assert "cpu_percent" in s and "ram_percent" in s
 
-def test_run_shell():
+def test_run_shell_is_a_blocked_compatibility_stub():
     out = run_shell("echo hello", timeout=5)
-    assert "hello" in out.lower() or "executed" in out.lower()
+    assert "shell execution is disabled" in out.lower()

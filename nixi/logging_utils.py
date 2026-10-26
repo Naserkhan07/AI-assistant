@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from nixi.config import NixiConfig, get_config
-from nixi.platform.capabilities import capability_report
+from nixi.platform.capabilities import capability_report, has_module
 
 _CONFIGURED = False
 
@@ -83,14 +83,21 @@ class Diagnostics:
         optional = None
         add("PyQt6 UI", True if caps["qt"] else optional, "available" if caps["qt"] else "headless mode only")
         add("screen capture", True if caps["pillow"] else optional, "Pillow available" if caps["pillow"] else "no Pillow")
-        add("microphone STT", True if (caps["sounddevice"] and caps["faster_whisper"]) else optional,
-            "sounddevice + faster-whisper" if caps["sounddevice"] else "audio input unavailable")
+        add("microphone STT dependencies", True if (caps["sounddevice"] and caps["faster_whisper"]) else optional,
+            "sounddevice + faster-whisper installed" if caps["sounddevice"] and caps["faster_whisper"] else "install audio extras with the Windows setup script")
+        mic_ok, mic_detail = self._microphone_status(caps["sounddevice"])
+        add("microphone device", mic_ok, mic_detail)
+        model = str(getattr(self.config, "whisper_model", "") or "").strip()
+        add("Whisper model setting", bool(model), model or "no transcription model selected")
         add("neural TTS", True if caps["edge_tts"] else optional,
             "edge-tts available" if caps["edge_tts"] else "silent/local fallback")
         add("system metrics", True if caps["psutil"] else optional,
             "psutil available" if caps["psutil"] else "using safe fallback")
         add("browser DOM", True if caps["playwright"] else optional,
-            "Playwright available" if caps["playwright"] else "vision-coordinate fallback")
+            "Playwright package installed; Chromium browser must also be installed" if caps["playwright"] else "default-browser launch available; install Playwright + Chromium for DOM actions")
+        office_ready = has_module("docx") and has_module("openpyxl")
+        add("Office document skills", True if office_ready else optional,
+            "Word and Excel libraries available" if office_ready else "install python-docx and openpyxl")
         add("RAG index", True if caps["sqlite_fts5"] else optional,
             "FTS5" if caps["sqlite_fts5"] else "LIKE fallback")
         llm_ok: bool | None = optional
@@ -114,6 +121,20 @@ class Diagnostics:
             "capabilities": caps,
             "warnings": self.config.validate(),
         }
+
+    @staticmethod
+    def _microphone_status(sounddevice_available: bool) -> tuple[bool | None, str]:
+        if not sounddevice_available:
+            return None, "audio input package is not installed"
+        try:
+            import sounddevice as sd
+            devices = sd.query_devices()
+            inputs = [d for d in devices if int(d.get("max_input_channels", 0)) > 0]
+            if inputs:
+                return True, f"{len(inputs)} input device(s) detected; recording permission is checked when capture starts"
+            return None, "no microphone input device found; check Windows microphone privacy and sound settings"
+        except Exception as exc:
+            return None, f"could not enumerate microphone devices: {exc}"
 
     def _data_writable(self) -> bool:
         try:

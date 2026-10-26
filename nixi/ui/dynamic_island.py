@@ -616,6 +616,7 @@ QToolButton#HeaderIconBtn:hover {
 
 class NixiDynamicIsland(QWidget):
     send_query_signal = pyqtSignal(str)
+    user_message_signal = pyqtSignal(str)
     dictate_toggled_signal = pyqtSignal(bool)
     screen_vision_signal = pyqtSignal()
     screen_always_signal = pyqtSignal(bool)
@@ -719,6 +720,13 @@ class NixiDynamicIsland(QWidget):
         self.pin_btn.toggled.connect(self._on_pin_toggled)
         header.addWidget(self.pin_btn)
 
+        self.tasks_btn = QToolButton()
+        self.tasks_btn.setObjectName("HeaderIconBtn")
+        self.tasks_btn.setText("☷")
+        self.tasks_btn.setToolTip("Active and recent tasks")
+        self.tasks_btn.clicked.connect(self._open_task_center)
+        header.addWidget(self.tasks_btn)
+
         # Close / collapse button
         collapse_btn = QToolButton()
         collapse_btn.setObjectName("HeaderIconBtn")
@@ -738,15 +746,15 @@ class NixiDynamicIsland(QWidget):
 
         scroll_content = QWidget()
         scroll_content.setStyleSheet("background: transparent;")
-        scroll_layout = QVBoxLayout(scroll_content)
-        scroll_layout.setContentsMargins(2, 2, 2, 2)
-
-        self.response_label = QLabel("I'm ready. Ask me anything, control system volume, search the web, fill forms, or dictate.")
-        self.response_label.setObjectName("ResponseText")
-        self.response_label.setWordWrap(True)
-        self.response_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        scroll_layout.addWidget(self.response_label)
-        scroll_layout.addStretch()
+        self.chat_layout = QVBoxLayout(scroll_content)
+        self.chat_layout.setContentsMargins(2, 2, 2, 2)
+        self.chat_layout.setSpacing(7)
+        self._chat_entries = []
+        self._streaming_bubble = None
+        self._add_chat_bubble(
+            "Nixi", "I'm ready. Ask me anything, control system volume, search the web, fill forms, or dictate.", False
+        )
+        self.chat_layout.addStretch()
 
         self.scroll.setWidget(scroll_content)
         exp_layout.addWidget(self.scroll)
@@ -757,7 +765,7 @@ class NixiDynamicIsland(QWidget):
         chips = [
             ("⚡ Fill Form", "fill these boxes"),
             ("🌐 Search Web", "search the web for "),
-            ("💻 PowerShell", "run powershell dir"),
+            ("📊 System", "system status"),
             ("👁️ See Screen", "see my screen"),
             ("🔇 Mute", "mute"),
             ("🖥️ Desktop", "show desktop"),
@@ -909,6 +917,7 @@ class NixiDynamicIsland(QWidget):
             self.input_field.setFocus()
             self.input_field.setCursorPosition(len(cmd))
         else:
+            self.user_message_signal.emit(cmd)
             self.send_query_signal.emit(cmd)
 
     def _on_send(self):
@@ -916,6 +925,7 @@ class NixiDynamicIsland(QWidget):
         if not text:
             return
         self.input_field.clear()
+        self.user_message_signal.emit(text)
         self.send_query_signal.emit(text)
 
     # ── Draggable Window via Header Mouse Press ──────────────────────────────
@@ -942,8 +952,81 @@ class NixiDynamicIsland(QWidget):
         self.audio_wave.set_level(level)
         self.eyes.set_audio_pulse(level)
 
+    def _add_chat_bubble(self, speaker: str, text: str, is_user: bool):
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        bubble = QFrame()
+        bubble.setObjectName("ChatBubbleUser" if is_user else "ChatBubbleNixi")
+        bg = "rgba(245, 158, 11, 0.19)" if is_user else "rgba(255, 255, 255, 0.08)"
+        border = "rgba(245, 158, 11, 0.38)" if is_user else "rgba(255, 255, 255, 0.12)"
+        bubble.setStyleSheet(
+            f"QFrame#{bubble.objectName()} {{ background: {bg}; border: 1px solid {border}; border-radius: 10px; }}"
+            "QLabel { color: #F3F4F6; background: transparent; border: none; }"
+        )
+        bubble_layout = QVBoxLayout(bubble)
+        bubble_layout.setContentsMargins(9, 6, 9, 6)
+        bubble_layout.setSpacing(3)
+        stamp = __import__("datetime").datetime.now().strftime("%H:%M")
+        heading = QLabel(f"{speaker}  ·  {stamp}")
+        heading.setStyleSheet("color: #FBBF24; font-size: 10px; font-weight: 700; background: transparent; border: none;")
+        body = QLabel(text)
+        body.setObjectName("ResponseText")
+        body.setWordWrap(True)
+        body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        bubble_layout.addWidget(heading)
+        bubble_layout.addWidget(body)
+        row_layout.addWidget(bubble, 0, Qt.AlignmentFlag.AlignRight if is_user else Qt.AlignmentFlag.AlignLeft)
+        row_layout.addStretch(1)
+        idx = max(0, self.chat_layout.count() - 1)
+        self.chat_layout.insertWidget(idx, row)
+        self._chat_entries.append({"row": row, "body": body, "is_user": is_user})
+        if len(self._chat_entries) > 80:
+            old = self._chat_entries.pop(0)
+            self.chat_layout.removeWidget(old["row"])
+            old["row"].deleteLater()
+        QTimer.singleShot(0, lambda: self.scroll.verticalScrollBar().setValue(self.scroll.verticalScrollBar().maximum()))
+        return body
+
+    def clear_chat(self):
+        """Remove all bubbles while retaining the final stretch spacer."""
+        for entry in self._chat_entries:
+            self.chat_layout.removeWidget(entry["row"])
+            entry["row"].deleteLater()
+        self._chat_entries.clear()
+        self._streaming_bubble = None
+
+    def add_chat_message(self, text: str, is_user: bool = False):
+        """Append a distinct, role-labelled chat turn to the conversation."""
+        if not text:
+            return
+        self._streaming_bubble = None
+        return self._add_chat_bubble("You" if is_user else "Nixi", text, is_user)
+
+    def update_assistant_stream(self, text: str):
+        """Update one assistant bubble as streamed tokens arrive (not duplicate messages)."""
+        if self._streaming_bubble is None:
+            self._streaming_bubble = self._add_chat_bubble("Nixi", text, False)
+        else:
+            self._streaming_bubble.setText(text)
+        QTimer.singleShot(0, lambda: self.scroll.verticalScrollBar().setValue(self.scroll.verticalScrollBar().maximum()))
+
     def set_response(self, text: str):
-        self.response_label.setText(text)
+        """Backwards-compatible alias for streaming response updates."""
+        self.update_assistant_stream(text)
+
+    def set_task_center(self, provider, cancel_callback):
+        self._task_provider = provider
+        self._task_cancel_callback = cancel_callback
+
+    def _open_task_center(self):
+        try:
+            from nixi.ui.task_center import TaskCenterDialog
+            provider = getattr(self, "_task_provider", lambda: [])
+            cancel = getattr(self, "_task_cancel_callback", lambda task_id: None)
+            TaskCenterDialog(provider, cancel, self).exec()
+        except Exception as exc:
+            self.set_status(f"Tasks unavailable: {exc}", "alert")
 
     def show_clipboard_chip(self, chip_info: dict):
         """Displays a reactive glowing chip when clipboard detects a URL, code, or error."""

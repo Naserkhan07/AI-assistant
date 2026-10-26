@@ -173,9 +173,11 @@ class AgentMemory:
     def get_history(self, limit: int = 20) -> list[dict[str, Any]]:
         try:
             with self._connect() as conn:
-                rows = conn.execute("SELECT role, content, created_at FROM conversations ORDER BY id ASC LIMIT ?",
-                                    (limit,)).fetchall()
-                return [dict(r) for r in rows]
+                rows = conn.execute(
+                    "SELECT role, content, created_at FROM conversations ORDER BY id DESC LIMIT ?",
+                    (max(1, min(int(limit), 500)),),
+                ).fetchall()
+                return [dict(r) for r in reversed(rows)]
         except Exception:
             return []
 

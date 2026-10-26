@@ -26,6 +26,7 @@ class AudioCapture:
         on_speech_finished: Optional[Callable[[np.ndarray], None]] = None,
         on_audio_level: Optional[Callable[[float], None]] = None,
         is_tts_speaking: Optional[Callable[[], bool]] = None,
+        is_ptt_held: Optional[Callable[[], bool]] = None,
     ):
         self.sample_rate = sample_rate
         self.chunk_size = int(sample_rate * (chunk_duration_ms / 1000.0))
@@ -36,6 +37,7 @@ class AudioCapture:
         self.on_speech_finished = on_speech_finished
         self.on_audio_level = on_audio_level
         self.is_tts_speaking = is_tts_speaking
+        self.is_ptt_held = is_ptt_held
 
         self.is_running = False
         self.stream = None
@@ -81,14 +83,15 @@ class AudioCapture:
 
         # Acoustic Echo Prevention: Ignore mic feedback when Nixi is speaking
         tts_active = self.is_tts_speaking() if self.is_tts_speaking else False
-        if tts_active:
+        ptt_barge_in = self.is_ptt_held() if self.is_ptt_held else False
+        if tts_active and not ptt_barge_in:
             self.echo_cooldown_until = time.time() + 0.6
             self.is_speaking = False
             self.speech_buffer = []
             self.silence_chunks = 0
             return
 
-        if time.time() < self.echo_cooldown_until:
+        if time.time() < self.echo_cooldown_until and not ptt_barge_in:
             self.is_speaking = False
             self.speech_buffer = []
             self.silence_chunks = 0

@@ -19,7 +19,7 @@ from typing import List, Dict, Any, Optional, Tuple
 class BrowserExecutionAgent:
     def __init__(self, llm_client):
         self.llm = llm_client
-        pyautogui.FAILSAFE = False
+        pyautogui.FAILSAFE = True  # Preserve PyAutoGUI's top-left emergency stop
         pyautogui.PAUSE = 0.01
 
     def execute_screen_goal(self, goal: str, screenshot_bytes: bytes) -> str:
@@ -36,21 +36,26 @@ class BrowserExecutionAgent:
             try:
                 actions, summary = self._detect_actions_vision(goal, screenshot_bytes, screen_w, screen_h, timeout=3.5)
                 if actions:
-                    self._run_actions(actions)
-                    return summary
-            except Exception:
-                pass
-            return self._fallback_fill(goal)
+                    executed, errors = self._run_actions(actions)
+                    if executed:
+                        suffix = " Verify the visible result; I cannot confirm the page accepted every field."
+                        return f"Attempted {executed} on-screen action(s). {summary}{suffix}"
+                    return f"No on-screen actions succeeded: {errors}"
+            except Exception as exc:
+                return f"Form action failed; no blind fallback was used: {exc}"
+            return "I couldn't identify safe, actionable fields; no clicks or typing were performed."
 
         # General vision action path (clicking buttons, links, etc.)
         try:
             actions, summary = self._detect_actions_vision(goal, screenshot_bytes, screen_w, screen_h, timeout=5.0)
             if actions:
-                self._run_actions(actions)
-                return summary
-            return self._fallback_fill(goal)
-        except Exception:
-            return self._fallback_fill(goal)
+                executed, errors = self._run_actions(actions)
+                if executed:
+                    return f"Attempted {executed} on-screen action(s). {summary} Verify the visible result."
+                return f"No on-screen actions succeeded: {errors}"
+            return "I couldn't identify a safe target; no screen actions were performed."
+        except Exception as exc:
+            return f"Screen action failed; no blind fallback was used: {exc}"
 
     def _detect_actions_vision(self, goal: str, screenshot_bytes: bytes, screen_w: int, screen_h: int, timeout: float = 4.0) -> Tuple[List[Dict[str, Any]], str]:
         """Ask Vision LLM for coordinate actions with compact prompt and aggressive timeout."""
@@ -102,76 +107,50 @@ Return JSON ONLY:
                 return data.get("actions", []), data.get("summary", "Executed browser actions.")
         return [], ""
 
-    def _run_actions(self, actions: List[Dict[str, Any]]):
-        """Execute a list of UI actions via pyautogui at maximum speed."""
+    def _run_actions(self, actions: List[Dict[str, Any]]) -> tuple[int, list[str]]:
+        """Execute validated screen actions and report attempted successes/errors."""
         screen_w, screen_h = pyautogui.size()
-
-        for act in actions:
-            act_type = act.get("type", "").lower()
+        executed = 0
+        errors: list[str] = []
+        allowed_keys = {"tab", "enter", "esc", "escape", "space", "backspace", "delete", "up", "down", "left", "right"}
+        allowed_hotkeys = {("ctrl", "a"), ("ctrl", "c"), ("ctrl", "v"), ("ctrl", "z"), ("shift", "tab")}
+        for act in actions[:20]:
+            act_type = str(act.get("type", "")).lower()
             try:
                 if act_type == "click":
-                    x = int(act.get("x", 0))
-                    y = int(act.get("y", 0))
-                    x = max(0, min(screen_w - 5, x))
-                    y = max(0, min(screen_h - 5, y))
+                    x = max(0, min(screen_w - 5, int(act.get("x", 0))))
+                    y = max(0, min(screen_h - 5, int(act.get("y", 0))))
                     pyautogui.click(x, y)
-                    time.sleep(0.01)
-
                 elif act_type == "type":
-                    text = act.get("text", "")
-                    if text:
-                        pyperclip.copy(text)
-                        time.sleep(0.005)
-                        pyautogui.hotkey('ctrl', 'v')
-                        time.sleep(0.01)
-
+                    text = str(act.get("text", ""))[:2000]
+                    if not text:
+                        errors.append("empty type action")
+                        continue
+                    pyperclip.copy(text)
+                    pyautogui.hotkey("ctrl", "v")
                 elif act_type == "press":
-                    key = act.get("key", "").lower()
-                    if key:
-                        pyautogui.press(key)
-                        time.sleep(0.005)
-
+                    key = str(act.get("key", "")).lower()
+                    if key not in allowed_keys:
+                        errors.append(f"blocked key: {key[:20]}")
+                        continue
+                    pyautogui.press(key)
                 elif act_type == "hotkey":
-                    keys = act.get("keys", [])
-                    if keys:
-                        pyautogui.hotkey(*keys)
-                        time.sleep(0.01)
-
+                    keys = tuple(str(k).lower() for k in act.get("keys", []))
+                    if keys not in allowed_hotkeys:
+                        errors.append("blocked hotkey")
+                        continue
+                    pyautogui.hotkey(*keys)
                 elif act_type == "wait":
-                    time.sleep(float(act.get("seconds", 0.05)))
-
-            except Exception:
-                continue
+                    time.sleep(max(0.0, min(3.0, float(act.get("seconds", 0.05)))))
+                else:
+                    errors.append(f"unsupported action: {act_type[:20]}")
+                    continue
+                executed += 1
+                time.sleep(0.01)
+            except Exception as exc:
+                errors.append(f"{act_type or 'action'} failed: {exc}")
+        return executed, errors
 
     def _fallback_fill(self, goal: str) -> str:
-        """Instant heuristic fallback: clicks form line and fills ID and Name via Tab progression."""
-        screen_w, screen_h = pyautogui.size()
-        target_x = int(screen_w * 0.22)
-        target_y = int(screen_h * 0.42)
-
-        try:
-            # Click field position
-            pyautogui.click(target_x, target_y)
-            time.sleep(0.02)
-
-            # Fast clipboard injection
-            pyperclip.copy("custom_field_id")
-            pyautogui.hotkey('ctrl', 'v')
-            time.sleep(0.01)
-
-            pyautogui.press('tab')
-            time.sleep(0.005)
-            pyperclip.copy("Custom Field Name")
-            pyautogui.hotkey('ctrl', 'v')
-            time.sleep(0.01)
-
-            pyautogui.press('tab')
-            time.sleep(0.005)
-            pyautogui.press('tab')
-            time.sleep(0.005)
-            pyperclip.copy("Generated custom field for workpackage")
-            pyautogui.hotkey('ctrl', 'v')
-
-            return "Completed form execution: ID, Name, and Description filled."
-        except Exception as e:
-            return f"Action execution error: {str(e)}"
+        """Do not guess coordinates or type made-up data when screen analysis fails."""
+        return "I could not identify the requested controls. No screen clicks or typing were performed."

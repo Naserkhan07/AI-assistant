@@ -23,6 +23,11 @@ pyperclip>=1.8
 pycaw>=20220416; sys_platform == "win32"
 keyboard>=0.13; sys_platform == "win32"
 
+# App integrations (document libraries are direct Python APIs; Playwright requires a separately installed browser)
+python-docx>=1.1
+openpyxl>=3.1
+playwright>=1.45
+
 # Web & intelligence (optional, used when available)
 exa-py>=0.8
 ddgs>=8.0

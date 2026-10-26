@@ -1,11 +1,7 @@
 """
-Nixi God-Mode Autonomous Agent
-Enables Nixi to execute ANY operation anywhere:
-- Full Windows system controls (Volume, Media, Windows, Hardware, Power)
-- Web automation & real-time Web Search (DuckDuckGo, URL navigation)
-- Shell & PowerShell execution
-- Screen vision & GUI automation (PyAutoGUI, Clipboard, Bilinear screen reading)
-- Intelligent routing with instant sub-50ms fast paths + Autonomous LLM Tool-Calling
+Nixi's bounded Windows agent with deterministic native actions and optional tool planning.
+Supports allow-listed system controls, browser navigation, file search, and confirmed
+screen interactions. Arbitrary shell and PowerShell execution are intentionally disabled.
 """
 from __future__ import annotations
 
@@ -18,7 +14,7 @@ from nixi.compat import fakes
 pyautogui = load("pyautogui", fakes.FakePyAutoGUI())
 pyperclip = load("pyperclip", fakes.FakePyperclip())
 try:
-    pyautogui.FAILSAFE = False; pyautogui.PAUSE = 0.02
+    pyautogui.FAILSAFE = True; pyautogui.PAUSE = 0.02
 except Exception: pass
 from typing import Dict, Any, List, Optional, Tuple, Callable
 
@@ -112,7 +108,26 @@ class GodModeAgent:
             return True, f"Today is {date_str}."
 
         # -------------------------------------------------------------
-        # 5. OPEN WEBSITES / POPULAR HUBS DIRECTLY
+        # 5. ALLOW-LISTED WINDOWS SETTINGS PAGES (deterministic native dispatch)
+        # -------------------------------------------------------------
+        settings_intent = re.search(
+            r"\b(?:open|show|go\s+to)\s+(?:the\s+)?(?:windows\s+)?(?:settings|setting)\b|"
+            r"\b(?:display|sound|bluetooth|wifi|wi-fi|network|apps|notifications|updates|privacy)\s+settings\b",
+            lower,
+        )
+        if settings_intent:
+            category = "system"
+            for word, page in (("display", "display"), ("sound", "sound"), ("bluetooth", "bluetooth"),
+                               ("wi-fi", "wifi"), ("wifi", "wifi"), ("network", "network"),
+                               ("apps", "apps"), ("notifications", "notifications"),
+                               ("updates", "updates"), ("privacy", "privacy")):
+                if word in lower:
+                    category = page
+                    break
+            return True, self.system.open_settings(category)
+
+        # -------------------------------------------------------------
+        # 6. OPEN WEBSITES / POPULAR HUBS DIRECTLY
         # -------------------------------------------------------------
         POPULAR_SITES = {
             "youtube": "https://www.youtube.com",
@@ -154,7 +169,7 @@ class GodModeAgent:
                 import urllib.parse
                 yt_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(yt_query)}"
                 self.system.open_url(yt_url)
-                return True, f"Searching and playing '{yt_query}' on YouTube."
+                return True, f"Opened YouTube search results for '{yt_query}'. I did not start playback."
 
         # -------------------------------------------------------------
         # 7. AGENT REACH WEB PAGE READER & YOUTUBE TRANSCRIPT
@@ -179,8 +194,7 @@ class GodModeAgent:
             return True, yt_info
 
         if lower in ("agent reach doctor", "reach doctor", "check internet reach", "agent reach status"):
-            out = self.system.run_powershell("app\\.venv\\Scripts\\agent-reach.exe doctor")
-            return True, f"Agent Reach Status:\n{out[:400]}"
+            return True, "Agent Reach CLI integration is not installed; this action does not launch a shell."
 
         # -------------------------------------------------------------
         # 8. EXA NEURAL & LIVE WEB SEARCH
@@ -204,18 +218,10 @@ class GodModeAgent:
         # -------------------------------------------------------------
         sh_match = re.search(r"^(?:run\s+powershell|powershell|cmd|terminal|exec|execute\s+command)\s+(.+)$", raw, re.IGNORECASE)
         if sh_match:
-            sh_cmd = sh_match.group(1).strip()
-            # Shell is powerful: require the configured confirmation policy before execution.
-            permissions = getattr(self, "permissions", None)
-            if permissions is not None:
-                from nixi.security.permissions import RiskLevel
-                decision = permissions.authorize("run_shell", RiskLevel.HIGH, {"command": sh_cmd})
-                if not decision.allowed:
-                    return True, f"Not run: {decision.reason}. You can allow shell commands in Settings if you choose."
-            if on_voice_feedback:
-                on_voice_feedback("Running the approved command.")
-            out = self.system.run_powershell(sh_cmd)
-            return True, f"Output:\n{out[:400]}"
+            return True, (
+                "I don't run PowerShell, CMD, or shell commands. Tell me the action you want "
+                "in plain language and I will use a built-in system skill when available."
+            )
 
         # -------------------------------------------------------------
         # 10. FILE SEARCH (Desktop, Documents, Downloads)
@@ -238,8 +244,14 @@ class GodModeAgent:
             or ("fill" in lower and ("form" in lower or "field" in lower or "boxes" in lower or "input" in lower))
         )
         if gui_intent:
+            permissions = getattr(self, "permissions", None)
+            if permissions is not None:
+                from nixi.security.permissions import RiskLevel
+                decision = permissions.authorize("browser_action", RiskLevel.HIGH, {"instruction": raw})
+                if not decision.allowed:
+                    return True, f"Screen action cancelled: {decision.reason}"
             if on_voice_feedback:
-                on_voice_feedback("Executing on screen.")
+                on_voice_feedback("Executing the confirmed screen action.")
             time.sleep(0.06)
             img_bytes = self.screen_reader.capture_screen()
             summary = self.browser_agent.execute_screen_goal(raw, img_bytes)

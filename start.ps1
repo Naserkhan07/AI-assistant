@@ -1,82 +1,28 @@
-# Nixi AI Desktop Assistant - Startup Script
-$ErrorActionPreference = "Continue"
+$ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-Write-Host ""
-Write-Host "==========================================================" -ForegroundColor Magenta
-Write-Host "             STARTING NIXI AI DESKTOP ASSISTANT           " -ForegroundColor Magenta
-Write-Host "   (Minimal Floating Pill • Dictation • Screen Vision)    " -ForegroundColor Cyan
-Write-Host "==========================================================" -ForegroundColor Magenta
-Write-Host ""
+$venvPython = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path $venvPython)) {
+    Write-Host "Nixi environment is missing. Run .\setup.ps1 first." -ForegroundColor Red
+    exit 1
+}
 
-# Load environment variables
-$envFile = if (Test-Path ".env") { ".env" } elseif (Test-Path "app\.env") { "app\.env" } else { $null }
-if ($envFile) {
-    Get-Content $envFile | ForEach-Object {
-        if ($_ -match "^\s*([^#][^=]+)=(.*)$") {
-            [System.Environment]::SetEnvironmentVariable($Matches[1].Trim(), $Matches[2].Trim(), "Process")
+# Load .env values into this process (does not spawn or open a shell window).
+$envPath = Join-Path $PSScriptRoot ".env"
+if (Test-Path $envPath) {
+    foreach ($line in Get-Content $envPath) {
+        if ($line -notmatch '^\s*#' -and $line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$') {
+            $key = $Matches[1]
+            $value = $Matches[2].Trim().Trim('"').Trim("'")
+            [Environment]::SetEnvironmentVariable($key, $value, "Process")
         }
     }
-    Write-Host "[+] Loaded environment from $envFile" -ForegroundColor Green
-}
-
-# Ensure FreeLLMAPI has keyless zero-cost providers seeded
-if (Test-Path "scripts\add-keyless-providers.mjs") {
-    Push-Location "repos\freellmapi"
-    node add-keyless-providers.mjs 2>$null | Out-Null
-    Pop-Location
-}
-
-# Check FreeLLMAPI
-Write-Host "[*] Checking FreeLLMAPI gateway on http://localhost:3001..." -ForegroundColor Yellow
-$freeLlmOnline = $false
-
-try {
-    $req = [System.Net.WebRequest]::Create("http://localhost:3001/v1/models")
-    $req.Timeout = 2000
-    if ($env:FREELLMAPI_KEY) {
-        $req.Headers.Add("Authorization", "Bearer " + $env:FREELLMAPI_KEY)
-    }
-    $resp = $req.GetResponse()
-    $freeLlmOnline = $true
-    $resp.Close()
-} catch [System.Net.WebException] {
-    if ($_.Response -ne $null) {
-        $freeLlmOnline = $true
-        $_.Response.Close()
-    }
-} catch {
-}
-
-if ($freeLlmOnline) {
-    Write-Host "[+] FreeLLMAPI is online and ready" -ForegroundColor Green
-} else {
-    Write-Host "[-] FreeLLMAPI is not running. Starting in background..." -ForegroundColor Yellow
-    if (Test-Path "repos\freellmapi\server\dist\index.js") {
-        Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$PSScriptRoot\repos\freellmapi'; node server/dist/index.js" -WindowStyle Minimized
-        Start-Sleep -Seconds 3
-        Write-Host "[+] FreeLLMAPI launched" -ForegroundColor Green
-    }
-}
-
-# Resolve Virtual Environment Python
-$venvPython = "$PSScriptRoot\app\.venv\Scripts\python.exe"
-if (-not (Test-Path $venvPython)) {
-    $venvPython = "python"
-}
-
-Write-Host "[*] Booting Nixi Floating Pill Interface..." -ForegroundColor Cyan
-Write-Host "[*] The floating pill will appear at the top center of your screen." -ForegroundColor White
-Write-Host "[*] Shortcuts: F8 = Dictation Toggle, F9 = Chat Panel, F10 = Screen Vision" -ForegroundColor White
-Write-Host ""
-
-# Stop any older running Nixi instances to release audio devices and RAM
-Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*nixi\main.py*" -and $_.ProcessId -ne $PID } | ForEach-Object {
-    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
 }
 
 $env:QT_LOGGING_RULES = "qt.qpa.window.warning=false;qt.qpa.window=false"
-& $venvPython nixi\main.py
-
-Write-Host ""
-Write-Host "Nixi session closed." -ForegroundColor Magenta
+Write-Host "Starting Nixi. Local built-in actions remain available if the model gateway is offline." -ForegroundColor Cyan
+& $venvPython (Join-Path $PSScriptRoot "nixi\main.py")
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Nixi exited with code $LASTEXITCODE. Run .\setup.ps1 and review diagnostics." -ForegroundColor Red
+    exit $LASTEXITCODE
+}

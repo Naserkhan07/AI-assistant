@@ -20,7 +20,7 @@ def test_callback_order():
         def on_progress(curr, total, label):
             calls.append((curr, total, label))
         ok, summary = planner.plan_and_execute("clean up my downloads", on_step_progress=on_progress)
-        assert ok and calls[0] == (1, 1, "Organizing Downloads folder...")
+        assert ok and calls[0] == (1, 1, "Organizing Downloads folder (undoable; no deletions)...")
         # signature must be (curr, total, label) not (label, curr, total)
         assert isinstance(calls[0][0], int)
 
