@@ -5,11 +5,13 @@ All previous dead keys from ``.env.example`` are now genuinely consumed.
 """
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATA_DIR = ROOT / "data"
@@ -17,6 +19,16 @@ DEFAULT_ENV_FILE = ROOT / ".env"
 
 TRUE_VALUES = {"1", "true", "yes", "on", "y"}
 SECRET_KEYS = frozenset({"api_key", "exa_api_key", "api_token"})
+
+
+def _is_loopback_http_url(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower()
+        return (parsed.scheme == "http" and not parsed.username and not parsed.password and
+                (host == "localhost" or ipaddress.ip_address(host).is_loopback))
+    except ValueError:
+        return False
 
 
 def as_bool(value: Any, default: bool = False) -> bool:
@@ -352,9 +364,16 @@ class NixiConfig:
         return cfg
 
     def provider_specs(self) -> list[ProviderSpec]:
-        """Ordered failover chain. Local-only/offline mode never emits network calls."""
-        if self.local_only or self.provider == "offline":
+        """Ordered failover chain; local-only uses Ollama, never a cloud endpoint."""
+        if self.provider == "offline":
             return [ProviderSpec("offline", kind="offline", model="local")]
+        if self.local_only:
+            local = []
+            if _is_loopback_http_url(self.ollama_base_url):
+                local.append(ProviderSpec("ollama-local", base_url=self.ollama_base_url, model=self.ollama_model,
+                                          vision_model=self.ollama_model, timeout=max(30.0, self.request_timeout)))
+            local.append(ProviderSpec("offline", kind="offline", model="local"))
+            return local
         specs: list[ProviderSpec] = []
         p = self.provider
         if p == "freellmapi":
@@ -372,11 +391,14 @@ class NixiConfig:
                                       vision_model=self.gemini_model, timeout=self.request_timeout))
         elif p in ("ollama", "lmstudio"):
             base = self.ollama_base_url if p == "ollama" else "http://127.0.0.1:1234/v1"
-            specs.append(ProviderSpec(p, base_url=base, model=self.ollama_model,
-                                      vision_model=self.ollama_model, timeout=self.request_timeout))
-        # Always append local fallbacks: they keep the assistant useful offline.
-        specs.append(ProviderSpec("ollama-local", base_url=self.ollama_base_url, model=self.ollama_model,
-                                  vision_model=self.ollama_model, timeout=min(self.request_timeout, 8.0)))
+            if p == "lmstudio" or _is_loopback_http_url(base):
+                specs.append(ProviderSpec(p, base_url=base, model=self.ollama_model,
+                                          vision_model=self.ollama_model, timeout=self.request_timeout))
+        # Always append a loopback-only Ollama fallback: no prompts are sent to an
+        # arbitrary remote host via a setting intended for local inference.
+        if _is_loopback_http_url(self.ollama_base_url):
+            specs.append(ProviderSpec("ollama-local", base_url=self.ollama_base_url, model=self.ollama_model,
+                                      vision_model=self.ollama_model, timeout=min(self.request_timeout, 8.0)))
         specs.append(ProviderSpec("offline", kind="offline", model="local"))
         return specs
 

@@ -92,14 +92,15 @@ class NixiLLMClient:
 
     def _providers(self) -> list[ProviderSpec]:
         specs = self.config.provider_specs()
-        if self._override_base or self._override_key or self._override_model:
+        if ((self._override_base or self._override_key or self._override_model)
+                and not self.config.local_only and self.config.provider != "offline"):
             specs = [ProviderSpec("override", base_url=self._override_base or specs[0].base_url,
                                   api_key=self._override_key or specs[0].api_key,
                                   model=self._override_model or specs[0].model)] + specs
         return specs
 
     def is_online(self) -> bool:
-        if self.config.local_only or self.config.provider == "offline":
+        if self.config.provider == "offline":
             return False
         if not self._client:
             return False
@@ -149,7 +150,7 @@ class NixiLLMClient:
         max_tokens = min(self.config.vision_max_tokens, 500) if vision else min(self.config.max_tokens, 600)
 
         # offline path — instant
-        if self.config.local_only or not self._client:
+        if not self._client:
             yield self.offline.reply(messages)
             return
 
@@ -163,122 +164,112 @@ class NixiLLMClient:
                     yield w + " "
                 return
 
-        providers = [p for p in self._providers() if not p.is_offline][:1]
+        # Try the configured provider first, then its local Ollama/LM Studio endpoint.
+        # A quota error must not be retried across other cloud models; that can worsen
+        # the rate limit without providing a keyless fallback.
+        providers: list[ProviderSpec] = []
+        seen: set[tuple[str, str]] = set()
+        for spec in self._providers():
+            if spec.is_offline:
+                continue
+            key = (spec.base_url.rstrip("/"), spec.model)
+            if key in seen:
+                continue
+            seen.add(key)
+            providers.append(spec)
         if not providers:
             yield self.offline.reply(messages)
             return
 
-        # One primary streaming attempt avoids serially waiting on many stale endpoints.
-        # If it fails, use a single short rescue attempt below.
-        has_streamed = False
-        collected: list[str] = []
-        start_ts = _time.time()
-        # limit total time budget to 9s — after that force offline fallback
-        time_budget = 9.0
-
+        started = _time.time()
+        total_budget = 75.0
+        cloud_limited = False
+        failures: list[str] = []
         for spec in providers:
-            if _time.time() - start_ts > time_budget:
+            if _time.time() - started >= total_budget:
+                failures.append("provider fallback time budget exhausted")
                 break
-            for model_name in self._candidate_models(vision)[:1]:
-                if _time.time() - start_ts > time_budget:
-                    break
-                url = f"{spec.base_url}/chat/completions"
-                headers = {"Content-Type": "application/json"}
-                if spec.api_key:
-                    headers["Authorization"] = f"Bearer {spec.api_key}"
-                payload = {"model": model_name, "messages": full, "temperature": temp, "max_tokens": max_tokens, "stream": True}
-                try:
-                    # tight timeout for streaming attempt
-                    with self._client.stream("POST", url, headers=headers, json=payload,
-                                             timeout=self._httpx.Timeout(connect=1.5, read=4.0, write=2.5, pool=2.0)) as resp:
-                        if resp.status_code != 200:
-                            log.debug("model %s -> %s, trying next", model_name, resp.status_code)
+            is_local = spec.name.lower() in {"ollama", "ollama-local", "lmstudio"} or any(
+                host in spec.base_url.lower() for host in ("127.0.0.1", "localhost", "::1")
+            )
+            candidates = [spec.model] if is_local and spec.model else self._candidate_models(vision)[:1]
+            if not candidates:
+                failures.append(f"{spec.name}: no model configured")
+                continue
+            model_name = candidates[0]
+            url = f"{spec.base_url.rstrip('/')}/chat/completions"
+            headers = {"Content-Type": "application/json"}
+            if spec.api_key:
+                headers["Authorization"] = f"Bearer {spec.api_key}"
+            payload = {"model": model_name, "messages": full, "temperature": temp,
+                       "max_tokens": max_tokens, "stream": True}
+            timeout_seconds = min(60.0, max(30.0, float(spec.timeout or 0))) if is_local else min(9.0, max(2.0, float(spec.timeout or 9)))
+            received: list[str] = []
+            stream_failed = False
+            try:
+                timeout = self._httpx.Timeout(
+                    connect=2.0, read=timeout_seconds, write=5.0, pool=3.0
+                ) if self._httpx else timeout_seconds
+                with self._client.stream("POST", url, headers=headers, json=payload, timeout=timeout) as resp:
+                    if resp.status_code != 200:
+                        failures.append(f"{spec.name}: HTTP {resp.status_code}")
+                        cloud_limited = cloud_limited or (not is_local and resp.status_code == 429)
+                        log.info("provider %s returned HTTP %s; trying local fallback", spec.name, resp.status_code)
+                        continue
+                    in_think = False
+                    for line in resp.iter_lines():
+                        line = line.strip()
+                        if not line or not line.startswith("data: "):
                             continue
-                        stream_failed = False
-                        in_think = False
-                        first_byte_deadline = _time.time() + 3.0  # must get first token quickly
-                        got_first = False
-                        for line in resp.iter_lines():
-                            if not got_first and _time.time() > first_byte_deadline:
+                        data_str = line[6:]
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                            if "error" in chunk:
                                 stream_failed = True
                                 break
-                            line = line.strip()
-                            if not line or not line.startswith("data: "):
+                            content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                            if not isinstance(content, str) or not content:
                                 continue
-                            data_str = line[6:]
-                            if data_str == "[DONE]":
-                                break
-                            try:
-                                chunk = json.loads(data_str)
-                                if "error" in chunk:
-                                    stream_failed = True
-                                    break
-                                delta = chunk.get("choices", [{}])[0].get("delta", {})
-                                content = delta.get("content", "")
-                                if not content:
+                            if "<think>" in content:
+                                in_think = True
+                            if in_think:
+                                if "</think>" not in content:
                                     continue
-                                if "<think>" in content:
-                                    in_think = True
-                                if in_think:
-                                    if "</think>" in content:
-                                        in_think = False
-                                        content = content.split("</think>")[-1]
-                                    else:
-                                        continue
-                                if content:
-                                    if not got_first:
-                                        got_first = True
-                                    has_streamed = True
-                                    collected.append(content)
-                                    yield content
-                            except Exception:
-                                continue
-                        if has_streamed and not stream_failed:
-                            if ckey:
-                                self._cache[ckey] = (_time.time(), "".join(collected))
-                            return
-                        if stream_failed:
-                            continue
-                except Exception as exc:
-                    # instant offline-style message instead of hanging
-                    if self._httpx and isinstance(exc, self._httpx.ConnectError):  # type: ignore
-                        yield "Gateway offline — I can still do local system tasks instantly. Say 'open chrome' or 'set timer 5 minutes'."
-                        return
-                    log.debug("stream error %s: %s", model_name, exc)
-                    continue
-
-        if has_streamed:
-            # Preserve partial output and make a stalled stream explicit instead of appearing frozen.
-            yield "\n\n(Response paused because the model connection stalled.)"
-            return
-
-        if not has_streamed:
-            # one non-streaming rescue with 2s timeout only
-            for spec in providers[:1]:  # only primary provider for speed
-                for m in ["mistral-nemo"]:
-                    if _time.time() - start_ts > time_budget:
-                        break
-                    try:
-                        url = f"{spec.base_url}/chat/completions"
-                        headers = {"Content-Type": "application/json"}
-                        if spec.api_key:
-                            headers["Authorization"] = f"Bearer {spec.api_key}"
-                        r = self._client.post(url, headers=headers,
-                                              json={"model": m, "messages": full, "temperature": temp, "max_tokens": 120, "stream": False}, timeout=2.0)
-                        if r.status_code == 200:
-                            content = r.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+                                in_think = False
+                                content = content.split("</think>")[-1]
                             if content:
-                                if ckey:
-                                    self._cache[ckey] = (_time.time(), content)
+                                received.append(content)
                                 yield content
-                                return
-                    except Exception:
-                        pass
-            # final instant fallback — never hang
-            if ckey and ckey in self._cache:
-                yield self._cache[ckey][1]
-            else:
-                yield "All cloud models are busy — try a local command like volume up, open notepad, or tell me what you want me to do on your PC."
+                        except (ValueError, TypeError, KeyError, IndexError):
+                            continue
+                if received and not stream_failed:
+                    if ckey:
+                        self._cache[ckey] = (_time.time(), "".join(received))
+                    return
+                if received:
+                    # Do not splice two models together after the user already heard
+                    # part of the first response; keep the partial answer explicit.
+                    yield "\n\n(Response paused because the model connection stalled.)"
+                    return
+                failures.append(f"{spec.name}: empty or failed stream")
+            except Exception as exc:
+                failures.append(f"{spec.name}: {type(exc).__name__}")
+                log.info("provider %s failed; trying fallback (%s)", spec.name, type(exc).__name__)
+
+        if ckey and ckey in self._cache:
+            yield self._cache[ckey][1]
+            return
+        local_down = any("ollama" in item.lower() or "lmstudio" in item.lower() for item in failures)
+        fallback = self.offline.reply(messages)
+        if cloud_limited and local_down:
+            yield ("FreeLLMAPI reached its limit and no local model responded. "
+                   "Start Ollama with the configured model for keyless AI responses. " + fallback)
+        elif local_down:
+            yield ("The configured local model is unavailable; built-in local skills still work. " + fallback)
+        else:
+            yield fallback
 
     def chat(self, messages: list[dict[str, Any]], temperature: float | None = None) -> str:
         return "".join(self.chat_stream(messages, temperature=temperature))

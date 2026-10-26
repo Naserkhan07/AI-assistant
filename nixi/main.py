@@ -43,6 +43,7 @@ from nixi.core.file_actions import FileActionService
 from nixi.core.task_center import TaskCenter
 from nixi.integrations.office import OfficeIntegration
 from nixi.integrations.vscode import VSCodeIntegration
+from nixi.integrations.jev_social import JevSocialIntegration
 from nixi.automation.browser import BrowserController
 from nixi.audio.audio_capture import AudioCapture
 from nixi.audio.stt import SpeechTranscriber
@@ -147,7 +148,12 @@ class NixiApp:
         self.file_actions = FileActionService(self.undo_manager)
         self.office = OfficeIntegration(self.file_actions)
         self.vscode = VSCodeIntegration(self.file_actions)
-        self.browser = BrowserController(llm_client=self.llm)
+        self.jev_social = JevSocialIntegration(
+            data_dir=self.config.data_dir,
+            ollama_base_url=self.config.ollama_base_url,
+            ollama_model=self.config.ollama_model,
+        )
+        self.browser = BrowserController(llm_client=self.llm, data_dir=self.config.data_dir)
         self.task_center = TaskCenter()
         self.permissions = PermissionManager(config=self.config, confirm_callback=self._confirm_action, journal=self.journal)
         self.llm._permission_manager = self.permissions
@@ -429,6 +435,17 @@ class NixiApp:
                 return f"{result}. {system.open_file(str(self.file_actions._resolve(relative)))}"
             return result
 
+        def search_social_media(query: str, platform: str = "auto", limit: int = 5) -> str:
+            cancel_event = self.task_center.cancel_event(task_id) if task_id else None
+            def progress(detail: str):
+                if task_id:
+                    self.task_center.update(task_id, detail, progress=55)
+                self.bridge.status_changed.emit(detail, "thinking")
+            return self.jev_social.run_search(
+                query=query, platform=platform, limit=limit,
+                cancel_event=cancel_event, on_progress=progress,
+            )
+
         system = self.god_agent.system
         tools = {
             "open_app": {"description": "Open a locally installed desktop app by its common name.", "function": self.app_launcher.launch, "risk": RiskLevel.SAFE},
@@ -451,7 +468,9 @@ class NixiApp:
             "read_excel_workbook": {"description": "Read up to 100 rows from a .xlsx workbook under the home folder. Args: path, sheet_name.", "function": self.office.read_workbook, "risk": RiskLevel.SAFE},
             "open_vscode_project": {"description": "Open an existing project directory under the home folder in VS Code. Args: path.", "function": self.vscode.open_project, "risk": RiskLevel.SAFE},
             "open_vscode_file": {"description": "Open an existing file under the home folder in VS Code. Args: path.", "function": self.vscode.open_file, "risk": RiskLevel.SAFE},
-            "open_website": {"description": "Open a website URL in the browser.", "function": self.browser.open_url, "risk": RiskLevel.SAFE},
+            "search_social_media": {"description": "Read-only research on public Instagram, TikTok, or LinkedIn content through Jev Social and socai CLI. Requires configured local Ollama plus installed Jev Social/socai. Never posts, likes, follows, or messages. Args: query, platform, limit.", "function": search_social_media, "risk": RiskLevel.SAFE},
+            "open_website": {"description": "Open an HTTP or HTTPS website URL in the Obscura-controlled browser when installed, otherwise use the configured browser fallback.", "function": self.browser.open_url, "risk": RiskLevel.SAFE},
+            "browser_search": {"description": "Search the public web in the controlled browser and return visible results. Args: query, engine (duckduckgo, bing, google). Read-only.", "function": self.browser.search_web, "risk": RiskLevel.SAFE},
             "browser_action": {"description": "Perform one bounded browser interaction: click a visible control, fill a named field, press a safe key, or read the current page. Args: instruction. Requires user confirmation.", "function": lambda instruction: self.browser.act(instruction), "risk": RiskLevel.HIGH},
             "window_action": {"description": "Manage windows: show desktop, snap left/right, maximize, close active, switch, or lock.", "function": system.window_management, "risk": RiskLevel.HIGH},
             "kill_process": {"description": "Stop a named process or PID. Use only when specifically requested.", "function": AgentToolsRegistry.kill_process, "risk": RiskLevel.CRITICAL},
@@ -622,7 +641,44 @@ class NixiApp:
                         self._delayed_status("Idle", "happy", 2.5)
                         return
 
-                # 4. God-Mode Agent (System, Media, Windows, Shell, Web Search, Popular Sites)
+                # Social research is routed deterministically to Jev Social's bounded,
+                # read-only workflows; it never posts, likes, follows, or messages.
+                platform_match = re.search(r"\b(instagram|tiktok|linkedin)\b", clean)
+                social_scope = re.search(r"\bsocial\s+(?:media|platforms?|networks?)\b", clean)
+                social_intent = re.search(r"\b(search|find|research|look\s+up|discover)\b", clean)
+                if (platform_match or social_scope) and social_intent:
+                    platform = platform_match.group(1) if platform_match else "auto"
+                    query = re.sub(r"^(?:please\s+)?(?:search|find|research|look\s+up|discover)\s+(?:for\s+)?", "", clean)
+                    query = re.sub(r"\b(?:on|in|using)?\s*(?:instagram|tiktok|linkedin|social\s+(?:media|platforms?|networks?))\b", "", query).strip(" \t,.-")
+                    query = re.sub(r"^(?:for|about)\s+", "", query).strip()
+                    self.task_center.update(task_id, "Starting local social research", progress=30)
+                    social_result = self.jev_social.run_search(
+                        query or clean, platform=platform, limit=5, cancel_event=cancel_event,
+                        on_progress=lambda detail: self.task_center.update(task_id, detail, progress=60),
+                    )
+                    self.bridge.chat_message_received.emit(social_result, False)
+                    self.tts.speak(social_result[:280])
+                    self.bridge.status_changed.emit("Done", "happy")
+                    self._delayed_status("Idle", "happy", 2.5)
+                    return
+
+                # Explicit public-web search uses deterministic routing, not an LLM tool choice.
+                web_scope = re.search(r"\b(web|internet|online|google|bing|duckduckgo)\b", clean)
+                search_intent = re.search(r"\b(search|look\s+up|find|google)\b", clean)
+                if web_scope and search_intent:
+                    query = re.sub(r"^(?:please\s+)?(?:search|look\s+up|find|google)\s+(?:for\s+)?", "", clean)
+                    query = re.sub(r"\b(?:on|in|using)?\s*(?:the\s+)?(?:web|internet|online|google|bing|duckduckgo)\b", "", query)
+                    query = re.sub(r"^(?:for|about)\s+", "", query).strip(" \t,.-")
+                    self.task_center.update(task_id, "Searching the public web", progress=45)
+                    self.bridge.status_changed.emit("Searching the public web", "thinking")
+                    web_result = self.browser.search_web(query or clean)
+                    self.bridge.chat_message_received.emit(web_result, False)
+                    self.tts.speak(web_result[:280])
+                    self.bridge.status_changed.emit("Done", "happy")
+                    self._delayed_status("Idle", "happy", 2.5)
+                    return
+
+                # 4. God-Mode Agent (bounded system, media, windows, and web routing)
                 handled, result = self.god_agent.process_command(cmd, on_voice_feedback=lambda msg: self.tts.speak(msg))
                 if handled:
                     self.bridge.status_changed.emit("Done", "happy")
@@ -945,6 +1001,11 @@ class NixiApp:
     def _quit_app(self) -> None:
         try:
             self.audio.stop()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "jev_social", None):
+                self.jev_social.cancel_all()
         except Exception:
             pass
         try:

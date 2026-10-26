@@ -13,7 +13,7 @@ A Windows-first desktop AI assistant inspired by **HeyNixi** and Apple's **Dynam
   - **Volume & Media**: Control master volume (`volume 70`, `mute`, `unmute`), media playback (`play`, `pause`, `next track`, `skip`).
   - **Window Management**: `tile left`, `tile right`, `maximize`, `minimize all`, `show desktop`, `lock computer`.
   - **Hardware Diagnostics**: Instant CPU, RAM, Disk, and Battery diagnostics (`system status`).
-  - **Web tools**: Search and page-reading features depend on configured providers and available network access; Nixi reports when a provider is unavailable.
+  - **Web tools**: Built-in bounded browser search can use DuckDuckGo, Bing, or Google through the controlled browser; cloud-model features still depend on their configured provider and network access.
   - **Native Windows actions**: Change volume/media state, open allow-listed Settings pages and apps, manage common windows, and inspect system status without invoking PowerShell, CMD, or another shell.
   - **Bounded file skills**: Find files and create/move/rename/trash files under the home folder; overwrites are refused, trash/moves are undoable, and destructive actions require confirmation.
 - **🎯 Bounded app integrations**: Playwright can target visible browser controls by name and verify filled values. Screen-coordinate interactions require confirmation; if visual targeting is uncertain, Nixi does nothing rather than inventing data. Office skills create/read Word and Excel files, and VS Code skills open files/projects; unsupported arbitrary automation is not promised.
@@ -72,6 +72,14 @@ Run the automated setup script in PowerShell:
 .\setup.ps1
 ```
 This script creates a virtual environment, installs Python dependencies, configures `.env`, and runs capability diagnostics. To also download the separate Chromium runtime for controlled DOM-based browser actions, use `.\setup.ps1 -InstallBrowser` (the download is optional and sizable).
+
+### Optional local AI, controlled browser, and social research
+Run `.\setup-integrations.ps1` in PowerShell to install Ollama and the default `qwen2.5:3b` model, Obscura, Node.js 22+, the `socai` CLI, and a pinned Jev Social release. The Ollama model download is several gigabytes; first-time setup may take a while. Published Obscura and socai archives are SHA-256 verified. Restart Nixi after setup.
+
+- Chat first uses the configured provider; if it is unavailable, Nixi tries loopback Ollama, then a built-in offline response. Set `NIXI_LOCAL_ONLY=true` in `.env` to prevent cloud-provider calls.
+- Obscura supplies a local CDP browser for bounded website opening, search, and visible-page actions. It is a separate integration from Jev Social.
+- Jev Social performs read-only research on public Instagram, TikTok, and LinkedIn content using local Ollama decisions and the `socai` workflow. It does not post, like, follow, message, bypass login gates, or alter account state. If a platform requires login, access must already be available through Jev Social's supported session; otherwise the search stops.
+- The installer does not ask for or store social account credentials. Use `-SkipOllama`, `-SkipObscura`, or `-SkipJevSocial` to omit an optional component.
 
 ### 3. Launching Nixi
 Start the assistant anytime with:
