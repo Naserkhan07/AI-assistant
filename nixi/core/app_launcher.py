@@ -45,6 +45,10 @@ class AppLauncher:
     def launch(app_name: str) -> tuple[bool, str]:
         """Launch an application given a common name."""
         name = app_name.strip().lower()
+        # The user's preference is to execute commands inside Nixi, never launch a shell UI.
+        shell_names = ("powershell", "pwsh", "cmd", "command prompt", "terminal")
+        if any(term in name for term in shell_names):
+            return False, "Shell windows are disabled; Nixi can run approved system commands in the background."
         # Direct lookup
         target = APP_MAP.get(name)
 

@@ -59,9 +59,20 @@ def run_shell(command: str, timeout: int = 15) -> str:
         return "Error: empty command."
     try:
         if IS_WINDOWS:
+            # PowerShell is a hidden, captured child process: never create a console window.
+            # This uses the Windows PowerShell runtime already supplied with Windows.
+            executable = os.path.join(
+                os.environ.get("SystemRoot", r"C:\Windows"),
+                "System32", "WindowsPowerShell", "v1.0", "powershell.exe",
+            )
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
             proc = subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+                [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
                 capture_output=True, text=True, timeout=timeout, check=False,
+                creationflags=flags, startupinfo=startupinfo,
             )
         else:
             proc = subprocess.run(

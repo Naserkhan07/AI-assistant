@@ -336,6 +336,54 @@ class NixiApp:
         import threading as _thr
         _thr.Thread(target=_do_transcribe, daemon=True).start()
 
+    @staticmethod
+    def _is_action_request(cmd: str) -> bool:
+        """Keep conversation on the chat path; route clear imperative requests to tools."""
+        text = cmd.strip().lower()
+        if not text:
+            return False
+        imperative = re.match(
+            r"^(?:(?:please|can you|could you|would you|i want you to)\s+)?"
+            r"(open|launch|start|close|maximize|minimize|lock|set|change|increase|decrease|mute|unmute|play|pause|skip|"
+            r"organize|clean|create|make|write|save|find|search|locate|kill|terminate|convert|click|fill|type|submit|"
+            r"move|rename|delete|remove|install|run|execute|scaffold|build)\b", text)
+        return bool(imperative)
+
+    def _run_action_tools(self, command: str) -> str:
+        """Let the model select from explicit built-in system skills (never an implicit shell)."""
+        from nixi.security.permissions import RiskLevel
+        from nixi.agent.tools_registry import AgentToolsRegistry
+
+        def organize(target_folder: str | None = None) -> str:
+            return AgentToolsRegistry.organize_folder(
+                target_folder=target_folder, delete_old_installers=False
+            )
+
+        def create_note(content: str = "", filename: str = "nixi_note.txt") -> str:
+            # Never implicitly copy clipboard contents into a new file.
+            note_text = content.strip() if content and content.strip() else "# Note\n\n"
+            return AgentToolsRegistry.create_and_open_note(
+                content=note_text, filename=filename, folder="Desktop"
+            )
+
+        system = self.god_agent.system
+        tools = {
+            "open_app": {"description": "Open a locally installed desktop app by its common name.", "function": self.app_launcher.launch, "risk": RiskLevel.SAFE},
+            "get_system_status": {"description": "Read CPU, memory, disk and battery status.", "function": system.get_system_stats, "risk": RiskLevel.SAFE},
+            "find_files": {"description": "Find files in Desktop, Documents and Downloads using a filename fragment.", "function": system.search_files, "risk": RiskLevel.SAFE},
+            "open_website": {"description": "Open a website URL in the user's default browser.", "function": system.open_url, "risk": RiskLevel.SAFE},
+            "set_volume": {"description": "Set system volume percentage from 0 to 100.", "function": system.set_audio_volume, "risk": RiskLevel.SAFE},
+            "media_control": {"description": "Control media playback: play_pause, next, prev, or stop.", "function": system.media_control, "risk": RiskLevel.SAFE},
+            "organize_folder": {"description": "Sort files into category subfolders; does not delete files.", "function": organize, "risk": RiskLevel.HIGH},
+            "create_note": {"description": "Create a text note on the Desktop and open it.", "function": create_note, "risk": RiskLevel.HIGH},
+            "window_action": {"description": "Manage windows: show desktop, snap left/right, maximize, close active, switch, or lock.", "function": system.window_management, "risk": RiskLevel.HIGH},
+            "kill_process": {"description": "Stop a named process or PID. Use only when specifically requested.", "function": AgentToolsRegistry.kill_process, "risk": RiskLevel.CRITICAL},
+        }
+        return self.llm.tool_loop(
+            [{"role": "user", "content": command}], tools=tools, max_iters=2,
+            temperature=0.0,
+        )
+
     def _execute_command_text(self, cmd: str):
         """Analyze user command asynchronously without freezing the UI thread."""
         if not cmd or not cmd.strip():
@@ -471,6 +519,16 @@ class NixiApp:
                     self.bridge.status_changed.emit("Done", "happy")
                     self.bridge.chat_message_received.emit(result, False)
                     self.tts.speak(result)
+                    self._delayed_status("Idle", "happy", 2.5)
+                    return
+
+                # Natural-language actions can use built-in skills, never an invisible raw shell.
+                if self._is_action_request(clean):
+                    self.bridge.status_changed.emit("Choosing a system action...", "thinking")
+                    action_result = self._run_action_tools(cmd)
+                    self.bridge.chat_message_received.emit(action_result, False)
+                    self.tts.speak(action_result)
+                    self.bridge.status_changed.emit("Done", "happy")
                     self._delayed_status("Idle", "happy", 2.5)
                     return
 
